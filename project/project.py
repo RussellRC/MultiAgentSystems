@@ -109,10 +109,10 @@ class InventorySnapshot(BaseModel):
 
 
 class FactoryState(BaseModel):
-    """Represents the shared state across agents in the Munder Difflin system."""
-    cash_balance: float = Field(default=0.0, description="Available cash balance.")
+    """
+    Represents the shared state across agents in the Munder Difflin system.
+    """
     min_cash_threshold: float = Field(default=5000.0, description="Minimum Cash Balance that MUST be maintained.")
-    as_of_date: str = Field(default=None, description="Date in ISO format up to which the factory state is valid.")
 
 
 class InventoryItem(BaseModel):
@@ -132,7 +132,9 @@ _factory_state = FactoryState()
 
 
 class FinancialTransaction(BaseModel):
-    """A financial transaction. Can be a stock order or a sale."""
+    """
+    A financial transaction. Can be a stock order or a sale.
+    """
     model_config = ConfigDict(from_attributes=True)
     id: str = Field(description="Transaction ID (uuid7)")
     item_name: str = Field(description="Name of the item involved in the transaction")
@@ -147,14 +149,18 @@ class FinancialTransaction(BaseModel):
 
 
 class TopSellingProduct(BaseModel):
-    """Data about a top-selling product."""
+    """
+    Data about a top-selling product.
+    """
     item_name: str = Field(description="Name of the item")
     total_units: int = Field(description="Total number of units sold")
     total_revenue: float = Field(description="Total revenue generated")
 
 
 class FinancialReport(BaseModel):
-    """A complete financial report for the company as of a specific date."""
+    """
+    A complete financial report for the company as of a specific date.
+    """
     as_of_date: str = Field(description="Date in ISO format up to which the report is generated")
     cash_balance: float = Field(description="Current cash balance")
     inventory_value: float = Field(description="Total value of inventory")
@@ -164,7 +170,9 @@ class FinancialReport(BaseModel):
 
 
 class QuoteCalculation(BaseModel):
-    """Deterministic quote math for a single quoted item."""
+    """
+    Deterministic quote math for a single quoted item.
+    """
     item_name: str = Field(description="Name of the quoted inventory item")
     quantity: int = Field(description="Quantity quoted")
     unit_price: float = Field(description="Unit price before discounts")
@@ -969,9 +977,9 @@ inventory_agent = Agent(
     capabilities=[Thinking()],
     output_type=InventoryAgentOutput,
     tools=[
-        get_minimum_cash_balance,
-        get_inventory_items_by_name,
-        get_stock_level,
+        get_minimum_cash_balance,           # to check whether before putting a "stock_orders" transaction
+        get_inventory_items_by_name,        # to get unit_price
+        get_stock_level,                    #
         get_all_inventory,
         get_supplier_delivery_date,
         create_transaction,
@@ -1016,7 +1024,7 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
     "1.1. Use your tools to help you identify the item names and their respective unit price.\n"
     "1.2. If the item name has many potential matches, break the tie using the most expensive one,"
     " e.g., A quote for 'A4 glossy paper' can match both 'Glossy paper' and 'A4 paper', but Glossy is more expensive, so use this one.\n"
-    "1.3. An item is a catalog product name only. Numbers and units of measure such as sheets, reams, packs, boxes, rolls, or each are part of the quantity, not separate items.\n"
+    "1.3. An item is a catalog product name only. Numbers and units of measure such as sheets, reams, packs, boxes, rolls, etc., are part of the quantity, not separate items.\n"
     "1.4. Pricing instructions such as 'do not apply discounts' or 'apply a bulk discount' are not item names and must not make an otherwise valid one-item request invalid.\n"
     "   - Example: '1000 sheets of A4 paper' is exactly one item: item_name='A4 paper', quantity=1000.\n"
     "   - Example: '100 sheets of A4 paper. DO NOT apply any discounts.' is exactly one item: item_name='A4 paper', quantity=100, apply_discount=false.\n"
@@ -1042,6 +1050,7 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
     "10. Based on the quote calculation breakdown, construct a human-readable explanation of the quote, which corresponds to the `quote_explanation` field of the response."
     " Your explanation must include the base cost, discounts applied (if any), reason of the discount, and the estimated delivery date.\n"
     "10.1. Only say a discount was applied when the final total is less than the base cost.\n"
+    "\n"
     "### Output Format Requirements\n"
     "- You MUST provide your final quote in the structured format with all required fields.\n"
 )
@@ -1063,11 +1072,11 @@ quoting_agent = Agent(
     output_type=QuotingAgentOutput,
     output_retries=3,
     tools=[
-        get_all_item_names,
-        search_quote_history,
-        get_inventory_items_by_name,  # gets unit_price
+        get_all_item_names,             # to match item names against quote request
+        search_quote_history,           # get past quotes
+        get_inventory_items_by_name,    # to get unit_price
+        get_supplier_delivery_date,     # estimates delivery based on quantity
         get_current_date,
-        get_supplier_delivery_date,  # estimates delivery based on quantity
     ]
 )
 
@@ -1103,7 +1112,73 @@ def validate_quoted_discount(output: QuotingAgentOutput) -> QuotingAgentOutput:
     return output
 
 
-ordering_agent = Agent(gpt_4o_mini, name="Ordering Agent")
+SALES_AGENT_SYSTEM_PROMPT = (
+    "You are the Sales and Ordering Agent for the Beaver's Choice Paper Company.\n"
+    "Your specific responsibilities are:\n"
+    "- Finalize sales transactions for customer orders.\n"
+    "- Strictly verify that inventory levels and supplier delivery timelines can meet the customer's requested date before accepting an order.\n"
+    "\n"
+    "### Order Fulfillment Rules\n"
+    "Before creating any sales transaction, you MUST perform the following checks:\n"
+    "1. Identify from the user input: the requested item name, exact quantity, the customer's desired delivery date, and the order date.\n"
+    "   - The 'order date' is the date the order is placed (the start date for supplier lead times).\n"
+    "   - The 'desired delivery date' is when the customer wants to receive the order.\n"
+    "   - An item is a catalog product name only. Numbers and units of measure such as sheets, reams, packs, boxes, rolls, etc., are part of the quantity, not separate items.\n"
+    "   - Use your tools to verify the exact catalog item name.\n"
+    "   - If the item name has many potential matches, break the tie using the most expensive one., "
+    " e.g., a request for 'A4 glossy paper' can match both 'Glossy paper' and 'A4 paper', but Glossy is more expensive, so use this one.\n"
+    "   - If no desired delivery date is provided, use the current date as delivery date.\n"
+    "   - If no order date is provided, use the current date as order date.\n"
+    " 1.1. If you are unable to understand the request, or if the desired delivery date is BEFORE the order date, immediately answer indicating the relevant errors in the `messages` field of the response.\n"
+    "2. Check the current stock level for the requested item.\n"
+    "3. Determine fulfillment capability:\n"
+    "   - Scenario A (In Stock): If current stock >= requested quantity, you can fulfill the order. Create the sales transaction.\n"
+    "   - Scenario B (Short Stock, Fast Delivery): If current stock < requested quantity, call get_supplier_delivery_date(order_date, quantity_needed)."
+    " This returns the date the supplier can deliver replenishment stock."
+    " If the supplier delivery date is ON or BEFORE the customer's requested delivery date, you can fulfill the order. Create the sales transaction.\n"
+    "   - Scenario C (Cannot Fulfill): If the supplier delivery date is AFTER the customer's requested delivery date, you MUST decline the order. DO NOT create a transaction.\n"
+    "4. When creating a transaction:\n"
+    "   - The `transaction_type` MUST be `sales`.\n"
+    "   - If the request includes a previously quoted total price (e.g. 'quote for N units at $X'), use that exact $X as the `price`. Do NOT recalculate or override it."
+    " Only calculate (quantity * unit_price) when no quoted price is given in the context.\n"
+    "   - The `transaction_date` MUST equal the customer's requested delivery date."
+    " If the customer did NOT give a delivery date, set it to the later of today or get_supplier_delivery_date(today, quantity).\n"
+    "5. In your `messages` array, clearly explain whether the order was accepted or declined, referencing the specific dates, stock levels, and timelines that led to your decision.\n"
+    "\n"
+    "### Output Format Requirements\n"
+    "- You MUST provide your final quote in the structured format with all required fields.\n"
+)
+
+class SalesAgentOutput(BaseModel):
+    """
+    Represents the response of the Sales & Ordering Agent.
+    """
+    order_status: str = Field(description="Must be either 'ACCEPTED' or 'DECLINED'")
+    placed_transactions: List[FinancialTransaction] = Field(
+        description="List of all 'sales' transactions successfully placed via the 'create_transaction' tool. Empty if declined.",
+        default=[]
+    )
+    messages: List[str] = Field(
+        description="List of all answer messages in response to the given request, explaining the fulfillment decision.",
+        default=[]
+    )
+
+sales_agent = Agent(
+    gpt_4o_mini,
+    name="Sales Agent",
+    system_prompt=SALES_AGENT_SYSTEM_PROMPT,
+    capabilities=[Thinking()],
+    output_type=SalesAgentOutput,
+    output_retries=3,
+    tools=[
+        get_all_item_names,             # To match item names against quote request
+        get_inventory_items_by_name,    # To get catalog names and unit prices
+        get_stock_level,                # To verify inventory
+        get_supplier_delivery_date,     # To check timelines if stock is short
+        create_transaction,             # To finalize the sale
+        get_current_date
+    ]
+)
 
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.

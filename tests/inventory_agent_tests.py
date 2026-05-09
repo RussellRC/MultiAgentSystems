@@ -1,15 +1,14 @@
 import os
-import tempfile
 import unittest
 from dataclasses import dataclass
 from datetime import date, timedelta
-from unittest.mock import patch
-from dotenv import load_dotenv
 
 from sqlalchemy import text
 
+from tests.test_utils import eval_report_cases
+
 # Use a file-based SQLite DB with check_same_thread=False so the agent thread can share the same database.
-_test_db_path = os.path.join(tempfile.gettempdir(), "test_inv_agent.db")
+_test_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_inv_agent.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 from pydantic_evals import Case, Dataset
@@ -19,8 +18,7 @@ from project.project import (
     init_database,
     DB_ENGINE,
     inventory_agent,
-    InventoryAgentOutput,
-    FinancialTransaction
+    InventoryAgentOutput
 )
 
 
@@ -28,6 +26,7 @@ def _task(query: str) -> InventoryAgentOutput:
     """Task function: run the inventory agent with the given query."""
     result = inventory_agent.run_sync(query)
     output: InventoryAgentOutput = result.output
+    print(output.model_dump_json(indent=2))
     return output
 
 
@@ -132,15 +131,6 @@ class HasMessage(Evaluator):
             "message_found": any(self.expected_message in msg for msg in ctx.output.messages)
         }
 
-
-def _assert_eval_results(case_result):
-    """Assert all scores and assertions on a single case result passed."""
-    for score_name, score in case_result.scores.items():
-        assert score.value, f"{score_name} failed for {case_result.name}"
-    for assertion_name, assertion in case_result.assertions.items():
-        assert assertion.value, f"{assertion_name} failed for {case_result.name}"
-
-
 class TestInventoryAgent(unittest.TestCase):
 
     @classmethod
@@ -184,8 +174,7 @@ class TestInventoryAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            _assert_eval_results(case_result)
+        eval_report_cases(report)
 
 
     def test_stock_level_at_date(self):
@@ -208,8 +197,7 @@ class TestInventoryAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            _assert_eval_results(case_result)
+        eval_report_cases(report)
 
 
     def test_restock_order_happy_path(self):
@@ -231,8 +219,7 @@ class TestInventoryAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            _assert_eval_results(case_result)
+        eval_report_cases(report)
 
 
     def test_restock_order_double_min_quantity(self):
@@ -290,8 +277,7 @@ class TestInventoryAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            _assert_eval_results(case_result)
+        eval_report_cases(report)
 
 
 if __name__ == "__main__":

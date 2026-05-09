@@ -1,8 +1,13 @@
 import os
-import tempfile
 import unittest
-from datetime import date
 from dataclasses import dataclass
+from datetime import date
+
+from tests.test_utils import eval_report_cases
+
+# Use a file-based SQLite DB with check_same_thread=False so the agent thread can share the same database.
+_test_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_quoting_agent.db")
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
@@ -11,12 +16,9 @@ from project.project import (
     init_database,
     DB_ENGINE,
     quoting_agent,
-    QuotingAgentOutput, get_supplier_delivery_date,
+    QuotingAgentOutput,
+    get_supplier_delivery_date,
 )
-
-# Use a file-based SQLite DB with check_same_thread=False so the agent thread can share the same database.
-_test_db_path = os.path.join(tempfile.gettempdir(), "test_quoting_agent.db")
-os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 
 def _task(query: str) -> QuotingAgentOutput:
@@ -124,11 +126,7 @@ class TestQuotingAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            for score_name, score in case_result.scores.items():
-                self.assertTrue(score.value, f"{score_name} failed for {case_result.name}")
-            for assertion_name, assertion in case_result.assertions.items():
-                self.assertTrue(assertion.value, f"{assertion_name} failed for {case_result.name}")
+        eval_report_cases(report)
 
 
     def test_large_amount_quote_a4_paper(self):
@@ -157,13 +155,8 @@ class TestQuotingAgent(unittest.TestCase):
         )
         report = dataset.evaluate_sync(_task)
         report.print()
-
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            for score_name, score in case_result.scores.items():
-                self.assertTrue(score.value, f"{score_name} failed for {case_result.name}")
-            for assertion_name, assertion in case_result.assertions.items():
-                self.assertTrue(assertion.value, f"{assertion_name} failed for {case_result.name}")
+        eval_report_cases(report)
 
 
     def test_quote_a4_glossy_paper(self):
@@ -193,13 +186,8 @@ class TestQuotingAgent(unittest.TestCase):
         )
         report = dataset.evaluate_sync(_task)
         report.print()
-
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            for score_name, score in case_result.scores.items():
-                self.assertTrue(score.value, f"{score_name} failed for {case_result.name}")
-            for assertion_name, assertion in case_result.assertions.items():
-                self.assertTrue(assertion.value, f"{assertion_name} failed for {case_result.name}")
+        eval_report_cases(report)
 
 
     def test_simple_quote_a4_paper_with_order_date(self):
@@ -229,11 +217,7 @@ class TestQuotingAgent(unittest.TestCase):
         report = dataset.evaluate_sync(_task)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
-        for case_result in report.cases:
-            for score_name, score in case_result.scores.items():
-                self.assertTrue(score.value, f"{score_name} failed for {case_result.name}")
-            for assertion_name, assertion in case_result.assertions.items():
-                self.assertTrue(assertion.value, f"{assertion_name} failed for {case_result.name}")
+        eval_report_cases(report)
 
 
 if __name__ == "__main__":
