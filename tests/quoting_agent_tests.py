@@ -15,7 +15,7 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
 from project.project import (
     init_database,
     DB_ENGINE,
-    quoting_agent,
+    new_quoting_agent,
     QuotingAgentOutput,
     get_supplier_delivery_date,
 )
@@ -23,7 +23,7 @@ from project.project import (
 
 def _task(query: str) -> QuotingAgentOutput:
     """Task function: run the quoting agent with the given query."""
-    result = quoting_agent.run_sync(query)
+    result = new_quoting_agent().run_sync(query)
     output: QuotingAgentOutput = result.output
     print(output.model_dump_json(indent=2))
     return output
@@ -188,7 +188,6 @@ class TestQuotingAgent(unittest.TestCase):
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
-
 
     def test_simple_quote_a4_paper_with_order_date(self):
         """

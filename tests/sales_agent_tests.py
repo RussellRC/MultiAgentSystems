@@ -15,26 +15,26 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
 from project.project import (
     init_database,
     DB_ENGINE,
-    sales_agent,
+    new_sales_agent,
     SalesAgentOutput,
     get_supplier_delivery_date,
 )
 
 def _task(query: str) -> SalesAgentOutput:
-    result = sales_agent.run_sync(query)
+    result = new_sales_agent().run_sync(query)
     output: SalesAgentOutput = result.output
     print(output.model_dump_json(indent=2))
     return output
 
 @dataclass
-class HasOrderStatus(Evaluator):
+class HasRequestStatus(Evaluator):
 
     status: str
 
     def evaluate(self, ctx: EvaluatorContext[str, SalesAgentOutput]):
-        if ctx.output.order_status == self.status:
-            return {"order_status_verified": True}
-        return {"order_status_verified": False}
+        if ctx.output.request_status == self.status:
+            return {"request_status_verified": True}
+        return {"request_status_verified": False}
 
 @dataclass
 class HasPlacedSalesTransaction(Evaluator):
@@ -66,7 +66,7 @@ class HasEmptySalesTransactions(Evaluator):
         return {"empty_transaction_verified": False}
 
 
-class TestSalesAgentScenarioA(unittest.TestCase):
+class TestSalesAgent(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
@@ -108,7 +108,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="ACCEPTED"),
+                HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
                     item_name="A4 paper",
                     units=quantity,
@@ -142,7 +142,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="ACCEPTED"),
+                HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
                     item_name="A4 paper",
                     units=quantity,
@@ -181,7 +181,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="ACCEPTED"),
+                HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
                     item_name="A4 paper",
                     units=quantity,
@@ -222,7 +222,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="ACCEPTED"),
+                HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
                     item_name="A4 paper",
                     units=quantity,
@@ -260,7 +260,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="DECLINED"),
+                HasRequestStatus(status="DECLINED"),
                 HasEmptySalesTransactions()
             ],
         )
@@ -294,7 +294,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="DECLINED"),
+                HasRequestStatus(status="DECLINED"),
                 HasEmptySalesTransactions()
             ],
         )
@@ -333,7 +333,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="ACCEPTED"),
+                HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
                     item_name=item,
                     units=qty,
@@ -367,7 +367,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="DECLINED"),
+                HasRequestStatus(status="DECLINED"),
                 HasEmptySalesTransactions()
             ],
         )
@@ -396,7 +396,7 @@ class TestSalesAgentScenarioA(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="SalesAgentOutput"),
-                HasOrderStatus(status="DECLINED"),
+                HasRequestStatus(status="DECLINED"),
                 HasEmptySalesTransactions()
             ],
         )

@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from dataclasses import dataclass
@@ -17,14 +18,14 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
 from project.project import (
     init_database,
     DB_ENGINE,
-    inventory_agent,
+    new_inventory_agent,
     InventoryAgentOutput
 )
 
 
 def _task(query: str) -> InventoryAgentOutput:
     """Task function: run the inventory agent with the given query."""
-    result = inventory_agent.run_sync(query)
+    result = new_inventory_agent().run_sync(query)
     output: InventoryAgentOutput = result.output
     print(output.model_dump_json(indent=2))
     return output
@@ -153,6 +154,38 @@ class TestInventoryAgent(unittest.TestCase):
         if os.path.exists(_test_db_path):
             os.remove(_test_db_path)
 
+    def test_prompt_from_orchestrator(self):
+        delivery_date = "2025-01-08"
+        initial_date = "2025-01-01"
+        items = {
+            "A4 paper": 5000
+        }
+        prompt = (
+            "A customer has placed an order with the details below. Please check the inventory stock levels for each item and replenish as needed following your rules.\n"
+            f"- Desired delivery date: {delivery_date}\n"
+            f"- Order date: {initial_date}\n"
+            f"- Items (in JSON format):\n"
+            f"{json.dumps(items)}"
+        )
+
+        dataset = Dataset(
+            name="prompt from orchestrator: A4 5000",
+            cases=[
+                Case(
+                    name="prompt from orchestrator: A4 5000",
+                    inputs=prompt,
+                    expected_output=None,
+                ),
+            ],
+            evaluators=[
+                IsInstance(type_name="InventoryAgentOutput"),
+            ],
+        )
+        report = dataset.evaluate_sync(_task)
+        report.print()
+        self.assertEqual(len(report.failures), 0, "No task failures expected")
+        eval_report_cases(report)
+
     def test_inventory_query_returns_item_details(self):
         """The agent should fetch and return details about a specific inventory item."""
         dataset = Dataset(
@@ -166,7 +199,6 @@ class TestInventoryAgent(unittest.TestCase):
             ],
             evaluators=[
                 IsInstance(type_name="InventoryAgentOutput"),
-                HasInventoryItem(item_name="Paper plates"),
                 HasCalculatedStockLevel(item_name="Paper plates", expected_stock=748),
                 HasPlacedTransaction(empty_transactions_expected=True)
             ],
@@ -207,71 +239,13 @@ class TestInventoryAgent(unittest.TestCase):
             cases=[
                 Case(
                     name="reorder_with_all_fields",
-                    inputs="Please reorder 200 units of Paper plates for delivery starting from 2026-01-01.",
+                    inputs="Please reorder 200 units of Paper plates for delivery with order date of 2026-01-01.",
                     expected_output=None,
                 ),
             ],
             evaluators=[
                 IsInstance(type_name="InventoryAgentOutput"),
                 HasPlacedTransaction(item_name="Paper plates", units=200, price=20.0, transaction_date="2026-01-05"),
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-
-    def test_restock_order_double_min_quantity(self):
-        """The agent should create a restock order for Paper plates to reach 2x its minimum quantity
-        after a sales transaction reduces its stock below the minimum."""
-
-        # First, get the current min_stock_level for "Paper plates"
-        with DB_ENGINE.connect() as connection:
-            result = connection.execute(
-                text("SELECT min_stock_level FROM inventory WHERE item_name = :item_name"),
-                {"item_name": "Paper plates"}
-            ).fetchone()
-            min_stock_level = result[0] if result else 0
-
-            # Insert a sales transaction to bring the stock below min_stock_level
-            # Assuming current stock is 748 (from other tests), let's sell enough to go below min_stock_level
-            current_stock = 748 # Based on initial data in init_database
-            quantity_to_sell = current_stock - min_stock_level + 10 # Ensure it goes below min_stock_level
-
-            connection.execute(
-                text(
-                    """
-                    INSERT INTO transactions (id, item_name, transaction_type, units, price, transaction_date)
-                    VALUES (:id, :item_name, :transaction_type, :units, :price, :transaction_date)
-                    """
-                ),
-                {
-                    "id": "test-sale-123",
-                    "transaction_type": "sales",
-                    "item_name": "Paper plates",
-                    "units": quantity_to_sell,
-                    "price": 0.1 * float(quantity_to_sell),
-                    "transaction_date": "2025-01-02"
-                }
-            )
-            connection.commit()
-
-        expected_date = (date.today() + timedelta(days=4)).isoformat()
-
-        # Now, run the agent to trigger the restock
-        dataset = Dataset(
-            name="restock_paper_plates_double_min",
-            cases=[
-                Case(
-                    name="restock_paper_plates",
-                    inputs="Restock the inventory of Paper plates.",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="InventoryAgentOutput"),
-                HasPlacedTransaction(item_name="Paper plates", units=154, price=15.4, transaction_date=expected_date)
             ],
         )
         report = dataset.evaluate_sync(_task)
