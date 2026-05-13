@@ -218,6 +218,41 @@ class TestQuotingAgent(unittest.TestCase):
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
 
+    def test_orchestrator_prompt_letter_sized_paper(self):
+        item_name = "letter-sized paper"
+        quantity = 300
+        delivery_date = "April 15, 2025"
+        order_date = "2025-01-01"
+        base_total = quantity * 0.06
+        prompt = (
+            "Please give me a quote. Here are the details about the customer request:\n"
+            f"- Item name: {item_name}\n"
+            f"- Quantity: {quantity}\n"
+            f"- Desired delivery date: {delivery_date}\n"
+            f"- Order date: {order_date}\n"
+        )
+
+        dataset = Dataset(
+            name="orchestrator_prompt_letter_sized_paper",
+            cases=[
+                Case(
+                    name="orchestrator_prompt_letter_sized_paper",
+                    inputs=prompt,
+                    expected_output=None,
+                ),
+            ],
+            evaluators=[
+                IsInstance(type_name="QuotingAgentOutput"),
+                HasReasonableTotal(min_amount=base_total*0.9, max_amount=base_total),
+                HasExplanation(),
+                HasDeliveryDate(expected_date="2025-01-05"),
+            ],
+        )
+        report = dataset.evaluate_sync(_task)
+        report.print()
+        self.assertEqual(len(report.failures), 0, "No task failures expected")
+        eval_report_cases(report)
+
 
 if __name__ == "__main__":
     unittest.main()
