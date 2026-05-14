@@ -1,0 +1,6 @@
+log_levels:
+  root: INFO
+  project: DEBUG
+  openai: INFO
+  httpcore: ERROR
+  httpx: ERROR

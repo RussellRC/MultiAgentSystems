@@ -2,67 +2,71 @@
 
 ```mermaid
 flowchart TD
+  subgraph "Multi-Agent System"
+    Orchestrator[Orchestrator Agent\nRoutes & Orchestrates]
+    OrderProcessorAgent[Order Processor Agent\nParse and understand customer request]
+    QuotingAgent[Quoting Agent\nGenerates competitive quotes]
+    InventoryAgent[Inventory Agent\nAnswers stock queries & manages reorders]
+    SalesAgent[Sales Agent\nFinalizes transactions]
 
-    subgraph "Multi-Agent System"
-        Orchestrator[OrchestratorAgent\nClassifies, Routes & Coordinates]
-        InventoryAgent[InventoryAgent\nAnswers stock queries & manages reorders]
-        QuotesAgent[QuotesAgent\nGenerates competitive quotes]
-        SalesAgent[SalesAgent\nFinalizes transactions]
-
-        ClassifyInput{Classify Request}
-        IsStockQuery[Stock/Inventory Query?]
-        IsQuoteRequest[Quote/Price Request?]
-        IsOrderRequest[Order/Purchase Request?]
+    subgraph OrderWorkflow [Sequential Order Workflow Execution]
+      direction TB
+      OrderProcessorAgent -.-> QuotingAgent
+      QuotingAgent -.-> InventoryAgent
+      InventoryAgent -.-> SalesAgent
     end
+  end
 
-    CustomerInput --> Orchestrator
-    Orchestrator --> ClassifyInput
-    ClassifyInput --> IsStockQuery
-    ClassifyInput --> IsQuoteRequest
-    ClassifyInput --> IsOrderRequest
+  CustomerInput([Customer Request]) --> Orchestrator
+  Orchestrator --> OrderProcessorAgent
+  Orchestrator --> QuotingAgent
+  Orchestrator --> InventoryAgent
+  Orchestrator --> SalesAgent
+  Orchestrator --> SystemOutput([System Response])
 
-    IsStockQuery --> |Yes| InventoryAgent
-    IsQuoteRequest --> |Yes| QuotesAgent
-    IsOrderRequest --> |Yes| SalesAgent
+  subgraph "Tools by Agent"
+    OrderProcessorAgent --> ProcTools["get_current_date\nget_all_item_names"]
+    QuotingAgent --> QuoteTools["get_all_item_names\nsearch_quote_history\nget_supplier_delivery_date\nestimates delivery based on quantity\nget_current_date"]
+    InventoryAgent --> InvTools["get_minimum_cash_balance\nget_inventory_items_by_name\nget_stock_level\nget_all_inventory\nget_supplier_delivery_date,\ncreate_transaction,\nget_current_date,\nget_cash_balance"]
+    SalesAgent --> SalesTools["get_all_item_names\nget_inventory_items_by_name\nget_stock_level\nget_supplier_delivery_date\ncreate_transaction\nget_current_date"]
+  end
 
-    InventoryAgent --> Orchestrator
-    QuotesAgent --> Orchestrator
-    SalesAgent --> Orchestrator
+  subgraph "Data Source"
+    SQLiteDB[("SQLite Database\n(munder_difflin.db)")]
+  end
 
-    Orchestrator --> SystemOutput([System Response])
+  ProcTools <--> SQLiteDB
+  InvTools <--> SQLiteDB
+  QuoteTools <--> SQLiteDB
+  SalesTools <--> SQLiteDB
+  
+  Orchestrator:::agent
+  OrderProcessorAgent:::agent
+  QuotingAgent:::agent
+  InventoryAgent:::agent
+  SalesAgent:::agent
+  ProcTools:::tool
+  InvTools:::tool
+  QuoteTools:::tool
+  SalesTools:::tool
+  SQLiteDB:::db
 
-    subgraph "Tools by Agent"
-        InventoryAgent --> InvTools["get_inventory_items_by_name\nget_stock_level\nget_all_inventory\nget_items_below_min_stock_level\nget_supplier_delivery_date\ncreate_transaction(stock_orders)\nget_cash_balance"]
-        QuotesAgent --> QuoteTools["search_quote_history"]
-        SalesAgent --> SalesTools["get_stock_level\nget_supplier_delivery_date\ncreate_transaction(sales)\ngenerate_financial_report"]
-    end
-
-    subgraph "Data Source"
-        SQLiteDB[("SQLite Database\n(munder_difflin.db)")]
-    end
-
-    InvTools <--> SQLiteDB
-    QuoteTools <--> SQLiteDB
-    SalesTools <--> SQLiteDB
-
-    classDef agent fill:#e1f5fe,stroke:#03a9f4,stroke-width:2px;
-    classDef tool fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
-    classDef db fill:#e8f5e9,stroke:#4caf50,stroke-width:2px;
-    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
-
-    class Orchestrator,InventoryAgent,QuotesAgent,SalesAgent agent;
-    class InvTools,QuoteTools,SalesTools tool;
-    class SQLiteDB db;
-    class ClassifyInput,IsStockQuery,IsQuoteRequest,IsOrderRequest decision;
+  style OrderWorkflow stroke:#D50000
+  classDef agent fill: #e1f5fe, stroke: #03a9f4, stroke-width: 2px
+  classDef tool fill: #fff3e0, stroke: #ff9800, stroke-width: 2px
+  classDef db fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
 ```
 
 ## Orchestrator Responsibilities
-- Request Classification: Determine if input is: stock query, quote request, or order request
-- Routing: Send to InventoryAgent (stock), QuotesAgent (pricing), SalesAgent (fulfillment)
-- State Coordination: Track cash balance & inventory state across agent calls (shared FactoryState pattern from l6)
-- Multi-step workflows: For orders: InventoryAgent → check stock → QuotesAgent → price → SalesAgent → fulfill
-- Error Handling: Handle insufficient inventory, low cash, unavailable items
-- Response Aggregation: Combine agent outputs into coherent customer response
+* **Sequential Coordination:** Manage the multi-step order lifecycle by calling specialized tools in sequence.
+* **Data Propagation:** Ensure quote details and delivery dates are passed correctly between agents.
+* **Response Aggregation:** Synthesize the results from all agent steps into a single, cohesive response for the customer.
+
+**Workflow Sequence for Orders:**
+OrderProcessingAgent: Parse and understand the customer request.
+QuotingAgent: Price items and provide a formal quote.
+InventoryAgent: Verify stock levels and execute replenishment if below minimums.
+SalesAgent: Fulfill the order and update the financial ledger.
 
 
 ### Request examples
@@ -80,5 +84,5 @@ flowchart TD
 
 - Example: "500 A4 paper, 300 cardstock, 200 washi tape"
   - Type: Complex multi-item
-  - Handled by: Orchestrator --> Inventory Agent (check stock) --> Quotes Agent (price) --> Sales Agent (fulfill)
+  - Handled by: Orchestrator --> Order Processor Agent --> Quoting Agent (pricing) --> Inventory Agent (stock keeping) --> Sales Agent (fulfill)
 

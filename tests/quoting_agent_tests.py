@@ -158,7 +158,6 @@ class TestQuotingAgent(unittest.TestCase):
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
 
-
     def test_quote_a4_glossy_paper(self):
         """
         Test quote for 100 sheets of A4 Glossy paper.

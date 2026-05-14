@@ -35,7 +35,8 @@ class HasExpectedRequiredFields(Evaluator):
     request_status: str
     items: Dict[str, int]
     words: List[str] = None
-    date: str | None = None
+    delivery_date: str | None = None
+    request_date: str | None = None
 
     def evaluate(self, ctx: EvaluatorContext[str, CustomerRequestDetails]):
         output = ctx.output
@@ -48,7 +49,8 @@ class HasExpectedRequiredFields(Evaluator):
             "has_expected_request_status": False,
             "has_expected_words": True,
             "has_expected_items": False,
-            "has_expected_date": True
+            "has_expected_delivery_date": True,
+            "has_expected_request_date": True
         }
 
         if self.request_status.lower() == "declined":
@@ -58,8 +60,11 @@ class HasExpectedRequiredFields(Evaluator):
             if output.request_status.lower() == "accepted":
                 evaluation["has_expected_request_status"] = True
 
-        if self.date:
-            evaluation["has_expected_date"] = self.date == output.delivery_date
+        if self.delivery_date:
+            evaluation["has_expected_delivery_date"] = self.delivery_date == output.delivery_date
+
+        if self.request_date:
+            evaluation["has_expected_request_date"] = self.request_date == output.request_date
 
         if self.words:
             evaluation["has_expected_words"] = any(word in message for word in self.words for message in output.messages)
@@ -67,8 +72,8 @@ class HasExpectedRequiredFields(Evaluator):
         if not self.items:
             evaluation["has_expected_items"] = True
         else:
-            output_items = {k.lower(): v for k, v in output.items}
-            expected_items = {k.lower(): v for k, v in self.items}
+            output_items = {k.lower(): v for k, v in output.items.items()}
+            expected_items = {k.lower(): v for k, v in self.items.items()}
             evaluation["has_expected_items"] = all(item in output_items for item in expected_items)
 
         return evaluation
@@ -113,7 +118,8 @@ class TestInventoryAgent(unittest.TestCase):
                     items={
                         "A4 paper": 500
                     },
-                    date=date.today().isoformat()
+                    delivery_date=date.today().isoformat(),
+                    request_date=date.today().isoformat()
                 )
             ],
         )
@@ -143,7 +149,39 @@ class TestInventoryAgent(unittest.TestCase):
                         "Letter-sized paper": 300,
                         "Cardstock": 200
                     },
-                    date="2025-04-15"
+                    delivery_date="2025-04-15",
+                    request_date=date.today().isoformat()
+                )
+            ],
+        )
+        report = dataset.evaluate_sync(_task)
+        report.print()
+        self.assertEqual(len(report.failures), 0, "No task failures expected")
+        eval_report_cases(report)
+
+    def test_quote_request_3(self):
+        dataset = Dataset(
+            name="test_quote_request_3",
+            cases=[
+                Case(
+                    name="test_quote_request_3",
+                    inputs="I need to order 10,000 sheets of A4 paper, 5,000 sheets of A3 paper, and 500 reams of printer paper. "
+                           "The supplies must be delivered by April 15, 2025, for our upcoming conference. "
+                           "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)",
+                    expected_output=None,
+                ),
+            ],
+            evaluators=[
+                IsInstance(type_name="CustomerRequestDetails"),
+                HasExpectedRequiredFields(
+                    request_status="ACCEPTED",
+                    items={
+                        "A4 paper": 10000,
+                        "A3 paper": 5000,
+                        "printer paper": 500
+                    },
+                    delivery_date="2025-04-15",
+                    request_date="2025-04-04"
                 )
             ],
         )

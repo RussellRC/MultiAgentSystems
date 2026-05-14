@@ -10,6 +10,7 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+import yaml
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, ConfigDict, TypeAdapter
@@ -27,9 +28,30 @@ logHandler = logging.StreamHandler()
 formatter = JsonFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
 logHandler.setFormatter(formatter)
 logging.getLogger().addHandler(logHandler)
-logging.getLogger().setLevel(logging.ERROR)
-logger.setLevel(logging.DEBUG)
-logging.getLogger("openai").setLevel(logging.DEBUG)
+
+
+def _load_log_levels() -> dict:
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logging.yaml")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            return yaml.safe_load(f).get("log_levels", {})
+
+
+_log_levels = _load_log_levels()
+
+
+def _resolve_level(name: str, default: int) -> int:
+    val = _log_levels.get(name)
+    if isinstance(val, str):
+        return getattr(logging, val.upper(), default)
+    return default
+
+
+logging.getLogger().setLevel(_resolve_level("root", logging.INFO))
+logger.setLevel(_resolve_level("project", logging.DEBUG))
+logging.getLogger("openai").setLevel(_resolve_level("openai", logging.DEBUG))
+logging.getLogger("httpcore").setLevel(_resolve_level("httpcore", logging.INFO))
+logging.getLogger("httpx").setLevel(_resolve_level("httpx", logging.INFO))
 
 # Create an SQLite database
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///munder_difflin.db")
@@ -535,6 +557,10 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
             - event_type
             - order_date
     """
+    # Sanitize search terms
+    # search_terms = [term for string in search_terms for term in string.split()]
+    # search_terms = [term for term in search_terms if term.lower() != "paper"]
+
     logger.debug("FUNC (search_quote_history): Searching quote history.",
                  extra={"search_terms": search_terms, "limit": limit})
 
@@ -574,7 +600,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     with DB_ENGINE.connect() as conn:
         result = conn.execute(text(query), params)
         list = [dict(row._mapping) for row in result]
-        logger.debug("FUNC (search_quote_history): Returning quote history. Found {len(list)} records.",
+        logger.debug(f"FUNC (search_quote_history): Returning quote history. Found {len(list)} records.",
                      extra={"search_terms": search_terms, "limit": limit})
         return list
 
@@ -611,7 +637,7 @@ def get_minimum_cash_balance() -> float:
 
 def get_current_date() -> str:
     """
-    Gets the current date in ISO format, e.g. "2026-01-01".
+    Gets the current date in ISO format, e.g. "2026-01-31".
 
     Returns:
          The current date in ISO format.
@@ -914,6 +940,10 @@ gpt_4o_mini = OpenAIChatModel(
     'gpt-4o-mini',
     provider=OpenAIProvider(openai_client=client)
 )
+gpt_4o = OpenAIChatModel(
+    'gpt-4o',
+    provider=OpenAIProvider(openai_client=client)
+)
 
 
 class InventoryAgentOutput(BaseModel):
@@ -956,7 +986,7 @@ INVENTORY_AGENT_SYSTEM_PROMPT = (
     "   - Calculate the missing quantity to fulfill the order\n"
     "   - Using your tools, get the estimated delivery date from the supplier for the missing quantity. Use the 'order date' given to you in the request for this operation; if such date was not provided then use the current date.\n"
     "   - If the supplier estimated delivery date is ON or BEFORE the requested order delivery date we know we can fulfill this order item. If it is not, then answer immediately to the customer explaining the problem.\n"
-    "   - Get the unit price for the item from your tools and compute the transaction price by multiplying the order quantity by the item's unit price\n"
+    "   - If given a unit price for the item, use it to compute the transaction price. Otherwise get the unit price from your tools. The transaction price by multiplying the order quantity by the item's unit price\n"
     "   - Use your tools to get the Company's Minimum Cash Balance threshold and the cash balance as of the supplier delivery date\n"
     "   - Compute the resulting Cash Balance of placing the transaction: (cash balance as of supplier delivery date - transaction price)\n."
     "   - Identify if the resulting cash balance will drop below the Minimum Cash Balance threshold. If it will, then answer immediately to the customer explaining the problem.\n"
@@ -966,7 +996,9 @@ INVENTORY_AGENT_SYSTEM_PROMPT = (
     "   - Get the minimum stock level for the item using your tools (this is static data of the item)\n"
     "   - Calculate the new stock level for the item AFTER the order is fulfilled (stock level at requested delivery date - order item quantity)\n"
     "   - Identify if the new stock level for the item will drop below its minimum level. If it won't, then there's no need to replenish the stock levels for the item\n"
-    "   - Otherwise, follow the exact same procedure as Step 2 to replenish the stock level for the item, but instead of replenishing the missing quantity to fulfill the order, you need to replenish the missing quantity to reach the minimum stock item level\n"
+    "   - Otherwise, follow the exact same procedure as Step 2 to replenish the stock level for the item, but you must calculate the exact replenishment quantity using this formula: `replenishment_quantity = minimum_stock_level - new_stock_level`.\n"
+    "   - Use this `replenishment_quantity` when calling `create_transaction`. NEVER order a negative quantity.\n"
+    "\n"
     "### Output\n"
     "- Always provide your final answer in a structured format\n"
 )
@@ -1009,6 +1041,14 @@ class QuotingAgentOutput(BaseModel):
                                 default_factory=list)
 
 
+class SimpleQuoteData(BaseModel):
+    """Essential quote details needed for inventory and sales processing."""
+    item_name: str = Field(description="Name of the catalog item")
+    quantity: int = Field(description="Quantity ordered")
+    unit_price: float = Field(description="Unit price of the item")
+    total_amount: float = Field(description="Total quoted price including discounts")
+
+
 ERROR_QUOTE_CALCULATION = QuoteCalculation(
     item_name="",
     quantity=-1,
@@ -1040,8 +1080,9 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
     "2.1. If any of these requirements are not met, answer immediately indicating the relevant errors in the `messages` field of the response.\n"
     "3. If the order date is not given, use today's date as the order date.\n"
     "4. If desired delivery date is not given, estimate the delivery date with `get_supplier_delivery_date` using the order date and quantity.\n"
-    "5. Use the `search_quote_history` tool with only the item name as the search term. Analyze the returned historical quotes to understand past pricing, discounts, and explanations for similar requests. This information should inform your current quote generation to ensure competitiveness and consistency.\n"
-    "6. Try to determine the unit price from the history search results. If you are unable to deduce it, use the `get_inventory_items_by_name` tool to get it\n."
+    "5. Use the `search_quote_history` tool with only the item name as the search term. Analyze the returned historical quotes to understand: unit price, discounts, and explanations for similar requests. This information should inform your current quote generation to ensure competitiveness and consistency.\n"
+    "6. If you are unable to determine the item unit price from the quote history search, use the `get_inventory_items_by_name` tool to get it. "
+    "If you find multiple potential matches, use the most expensive one to break the tie, e.g., 'A4 glossy paper' can match both 'Glossy paper' and 'A4 paper', but Glossy is more expensive, so use this one.\n."
     "7. Calculate the base cost (quantity × unit_price). If you are unable to do so, answer immediately indicating the relevant errors in the `messages` field of the response.\n"
     "8. Apply any discount you judge appropriate based on your analysis from the quote history, unless explicitly indicated not to do so.\n"
     "9. Generate a detailed quote calculation breakdown, which corresponds to the `quote_calculation` field of your response. This includes:\n"
@@ -1063,10 +1104,10 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
 
 def new_quoting_agent() -> Agent:
     quoting_agent = Agent(
-        gpt_4o_mini,
+        gpt_4o,
         name="Quoting Agent",
         system_prompt=QUOTING_AGENT_SYSTEM_PROMPT,
-        capabilities=[Thinking()],
+        capabilities=[Thinking(effort='high')],
         output_type=QuotingAgentOutput,
         output_retries=3,
         tools=[
@@ -1170,7 +1211,7 @@ def new_sales_agent():
         gpt_4o_mini,
         name="Sales Agent",
         system_prompt=SALES_AGENT_SYSTEM_PROMPT,
-        capabilities=[Thinking()],
+        capabilities=[Thinking(effort='high')],
         output_type=SalesAgentOutput,
         output_retries=3,
         tools=[
@@ -1209,20 +1250,22 @@ class CustomerRequestDetails(BaseModel):
     """
     Represents the details of a customer request
     """
-    request_metadata: RequestMetadata = Field(description="Metadata about the customer request.", default=None)
     delivery_date: str = Field(description="Expected delivery date for the order, in ISO format.",
-                               examples=["2026-01-01"])
+                               examples=["2026-01-31"])
+    request_date: str = Field(description="Date on which the order is made, in ISO format.",
+                              examples=["2026-01-31"])
     items: Dict[str, int] = Field(description="Ordered items and quantities.", default_factory=dict)
+    request_metadata: RequestMetadata = Field(description="Metadata about the customer request.", default=None)
     request_status: str = Field(description="Must be either 'ACCEPTED' or 'DECLINED'", default="DECLINED")
     messages: List[str] = Field(description="List of all answer messages in response to the given request.",
                                 default_factory=list)
-
 
 ORDER_PROCESSOR_SYSTEM_PROMPT = (
     "You are the Order Processor for the Beaver's Choice Paper Company\n."
     "Your job is to understand customer requests and determine:\n"
     "- Specific names of the items and their respective quantities\n"
-    "- Expected or desired delivery date"
+    "- Expected or desired delivery date by the customer"
+    "- Date of request"
     "- Inferred additional context like: mood of the customer, his/her occupation or job, event type\n"
     "\n"
     "### CONSTRAINTS:\n"
@@ -1230,9 +1273,13 @@ ORDER_PROCESSOR_SYSTEM_PROMPT = (
 )
 
 ORDER_PROCESSOR_INSTRUCTIONS = (
-    "Identify the item names an quantities that the customer wants to order, as well as the desired delivery date for the order.\n"
+    "Identify the following elements from the customer request:\n"
+    "- Item names and respective quantities\n"
+    "- Delivery date: Date on which the customer wants the order to be delivered\n"
+    "- Request date: Date on which the order is made\n"
     "Use the following guidelines to achieve your task:\n"
-    "  - If an expected or desired delivery date is not provided by the customer, use the current date as delivery date.\n"
+    "  - If the desired delivery date is not provided by the customer, use the current date as delivery date.\n"
+    "  - If the request date is not provided in the input, use the current date as delivery date.\n"
     "  - The `get_all_item_names` tool contains all the catalog item names in the Company, use it to get examples of item names.\n"
     "  - An item is a catalog product name only. Numbers and units of measure such as sheets, reams, packs, boxes, rolls, etc., are part of the quantity, not separate items.\n"
     "\n"
@@ -1265,7 +1312,6 @@ def new_order_processor_agent() -> Agent:
 
 @dataclass
 class OrchestratorDependencies:
-    initial_date: str
     order_processor_agent: Agent
     inventory_agent: Agent
     quoting_agent: Agent
@@ -1276,6 +1322,8 @@ class OrchestratorAgentOutput(BaseModel):
     """
     Represents the response of the Orchestrator Agent.
     """
+    order_status: str = Field(
+        description="Must be either 'ACCEPTED' or 'DECLINED'. An order is 'DECLINED' if it's not possible to fulfill it due to any errors.")
     customer_response: str = Field(description=(
         "Human-readable response for the customer. Must be in plain text, informing him/her of the order status, total price, and delivery dates. "
         "It should also have confirmation about the quantities, quoted prices and applied discounts."))
@@ -1345,6 +1393,7 @@ def _build_orchestrator_agent() -> Agent:
                 user_prompt=user_prompt,
                 instructions=ORDER_PROCESSOR_INSTRUCTIONS,
             )
+            logger.debug("Got response from order processor.", extra={"output": response.output})
             return response.output
 
         except Exception as e:
@@ -1358,38 +1407,41 @@ def _build_orchestrator_agent() -> Agent:
             )
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
-    def generate_quote(ctx: RunContext[OrchestratorDependencies], customer_request_details: CustomerRequestDetails) -> \
-    List[QuotingAgentOutput]:
+    def generate_quote(ctx: RunContext[OrchestratorDependencies], items: Dict[str, int], delivery_date: str, request_date: str) -> List[
+        QuotingAgentOutput]:
         """
         Communicate with the Quoting Agent to generate a quote of a single item of a customer request.
 
         Args:
             ctx: Context about the current call
-            customer_request_details: CustomerRequestDetails object about a customer order/request generated by the Order Processor Agent
+            items: A dictionary of the ordered items and their quantities extracted from the customer request.
+            delivery_date: The expected delivery date for the order, in ISO format.
+            request_date: Date on which the order is made, in ISO format.
 
         Returns:
             A list of QuotingAgentOutput objects generated by the Quoting Agent.
             Each element corresponds to a quote for a single item-quantity pair in the order / customer request.
         """
         try:
-            logger.info("Getting quote for items.", extra={"customer_request_details": customer_request_details})
+            logger.info("Getting quote for items.", extra={"items": items, "delivery_date": delivery_date})
             quotes = []
-            for item_name, quantity in customer_request_details.items.items():
+            for item_name, quantity in items.items():
                 user_prompt = (
                     "Please give me a quote. Here are the details about the customer request:\n"
                     f"- Item name: {item_name}\n"
                     f"- Quantity: {quantity}\n"
-                    f"- Desired delivery date: {customer_request_details.delivery_date}\n"
-                    f"- Order date: {ctx.deps.initial_date}\n"
+                    f"- Desired delivery date: {delivery_date}\n"
+                    f"- Order date: {request_date}\n"
                 )
                 response = ctx.deps.quoting_agent.run_sync(user_prompt=user_prompt)
                 logger.debug("Got response from quoting agent.", extra={"output": response.output})
                 quotes.append(response.output)
 
+            logger.debug("Got all item quotes from quoting agent.", extra={"quotes": quotes})
             return quotes
         except Exception as e:
-            logger.error(f"Error producing quote.", exc_info=True,
-                         extra={"customer_request_details": customer_request_details})
+            logger.error("Error producing quote.", exc_info=True,
+                         extra={"items": items, "delivery_date": delivery_date})
             return [QuotingAgentOutput(
                 messages=[
                     "I'm sorry, we encountered an error generating a quote. Please try again later or contact customer service."],
@@ -1418,15 +1470,16 @@ def _build_orchestrator_agent() -> Agent:
         return max(date.fromisoformat(date_str) for date_str in delivery_dates).isoformat()
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
-    def manage_inventory(ctx: RunContext[OrchestratorDependencies], item_quotes: List[QuotingAgentOutput],
-                         latest_delivery_date: str) -> InventoryAgentOutput:
+    def manage_inventory(ctx: RunContext[OrchestratorDependencies], quotes_data: List[SimpleQuoteData],
+                         latest_delivery_date: str, request_date: str) -> InventoryAgentOutput:
         """
         Communicate with the Inventory Agent to manage inventory for an order and replenish supplies if needed
 
         Args:
             ctx: Context about the current call
-            item_quotes: Individual item quotes generated by the Quoting Agent
+            quotes_data: Essential details extracted from the generated quotes.
             latest_delivery_date: The latest estimated delivery date from all the quotes, in ISO format.
+            request_date: Date on which the order is made, in ISO format.
 
         Returns:
             The response that the Inventory Agent generated.
@@ -1434,40 +1487,47 @@ def _build_orchestrator_agent() -> Agent:
         try:
             logger.info(
                 f"Managing inventory for order.",
-                extra={"item_quotes": item_quotes, "latest_delivery_date": latest_delivery_date,
-                       "order_date": ctx.deps.initial_date}
+                extra={"quotes_data": [q.model_dump() for q in quotes_data],
+                       "latest_delivery_date": latest_delivery_date,
+                       "order_date": request_date}
             )
-            items = {quote.quote_calculation.item_name: quote.quote_calculation.quantity for quote in item_quotes}
+            items = {quote.item_name: {
+                "quantity": quote.quantity,
+                "unit_price": quote.unit_price,
+            } for quote in quotes_data}
+
             user_prompt = (
                 "A customer has placed an order with the details below. Please check the inventory stock levels for each item and replenish as needed following your rules.\n"
                 f"- Desired delivery date: {latest_delivery_date}\n"
-                f"- Order date: {ctx.deps.initial_date}\n"
+                f"- Order date: {request_date}\n"
                 f"- Items (in JSON format):\n"
                 f"{json.dumps(items)}"
             )
             response = ctx.deps.inventory_agent.run_sync(user_prompt=user_prompt)
+            logger.debug("Got response from inventory agent.", extra={"output": response.output})
             return response.output
 
         except Exception as e:
             logger.error(f"Error managing inventory.",
                          exc_info=True,
-                         extra={"item_quotes": item_quotes, "latest_delivery_date": latest_delivery_date,
-                                "order_date": ctx.deps.initial_date})
+                         extra={"quotes_data": quotes_data, "latest_delivery_date": latest_delivery_date,
+                                "order_date": request_date})
             return InventoryAgentOutput(
                 messages=[
                     "I'm sorry, we encountered an error managing the inventory for your order. Please try again later or contact customer service."],
             )
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
-    def handle_sale(ctx: RunContext[OrchestratorDependencies], item_quotes: List[QuotingAgentOutput],
-                    latest_delivery_date: str) -> List[SalesAgentOutput]:
+    def handle_sale(ctx: RunContext[OrchestratorDependencies], quotes_data: List[SimpleQuoteData],
+                    latest_delivery_date: str, request_date: str) -> List[SalesAgentOutput]:
         """
         Communicate with the Sales agent to finalize a sales transaction.
 
         Args:
-            ctx: Context about the current
-            item_quotes: Individual item quotes generated by the Quoting Agent
+            ctx: Context about the current call
+            quotes_data: Essential details extracted from the generated quotes.
             latest_delivery_date: The latest estimated delivery date from all the quotes, in ISO format.
+            request_date: Date on which the order is made, in ISO format.
 
         Returns:
             A list of SalesAgentOutput objects generated by the Sales Agent.
@@ -1477,32 +1537,32 @@ def _build_orchestrator_agent() -> Agent:
             logger.info(
                 "Finalizing a sales transaction for the order.",
                 extra={
-                    "item_quotes": item_quotes,
+                    "quotes_data": [q.model_dump() for q in quotes_data],
                     "latest_delivery_date": latest_delivery_date,
-                    "order_date": ctx.deps.initial_date
+                    "order_date": request_date
                 }
             )
             sales_responses = []
-            for item_quote in item_quotes:
-                quote_calculation = item_quote.quote_calculation
+            for quote in quotes_data:
                 user_prompt = (
                     "The customer wants to finalize an order.\n"
-                    f"They previously received a quote for {quote_calculation.quantity} units "
-                    f"of {quote_calculation.item_name} at a total price of ${quote_calculation.total_amount:.2f}. "
+                    f"They previously received a quote for {quote.quantity} units "
+                    f"of {quote.item_name} at a total price of ${quote.total_amount:.2f}. "
                     f"Please fulfill this order for delivery by {latest_delivery_date}."
                 )
                 response = ctx.deps.sales_agent.run_sync(user_prompt=user_prompt)
                 sales_responses.append(response.output)
 
+            logger.debug("Got response from sales agent.", extra={"output": sales_responses})
             return sales_responses
 
         except Exception as e:
             logger.error(f"Error finalizing a sales transaction for an order.",
                          exc_info=True,
                          extra={
-                             "item_quotes": item_quotes,
+                             "quotes_data": quotes_data,
                              "latest_delivery_date": latest_delivery_date,
-                             "order_date": ctx.deps.initial_date
+                             "order_date": request_date
                          })
             return [SalesAgentOutput(
                 messages=[
@@ -1515,14 +1575,12 @@ def _build_orchestrator_agent() -> Agent:
 
 class OrchestratorAgent:
 
-    def __init__(self, initial_date: str):
-        self.initial_date = initial_date
+    def __init__(self):
         self.order_processor_agent = new_order_processor_agent()
         self.inventory_agent = new_inventory_agent()
         self.quoting_agent = new_quoting_agent()
         self.sales_agent = new_sales_agent()
         self.orchestrator_dependencies = OrchestratorDependencies(
-            self.initial_date,
             self.order_processor_agent,
             self.inventory_agent,
             self.quoting_agent,
@@ -1581,7 +1639,7 @@ def run_test_scenarios():
     ############
     ############
     # INITIALIZE YOUR MULTI AGENT SYSTEM HERE
-    orchestrator = OrchestratorAgent(initial_date)
+    orchestrator = OrchestratorAgent()
     ############
     ############
     ############
@@ -1607,15 +1665,14 @@ def run_test_scenarios():
         ############
         ############
 
-        # response = call_your_multi_agent_system(request_with_date)
-        response = "some response"
+        response = orchestrator.process_customer_order(request_with_date)
 
         # Update state
         report = generate_financial_report(request_date)
         current_cash = report.cash_balance
         current_inventory = report.inventory_value
 
-        print(f"Response: {response}")
+        print(f"Response: {response.model_dump_json(indent=2)}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
 
@@ -1644,5 +1701,4 @@ def run_test_scenarios():
 
 
 if __name__ == "__main__":
-    # results = run_test_scenarios()
-    init_database(DB_ENGINE)
+    results = run_test_scenarios()

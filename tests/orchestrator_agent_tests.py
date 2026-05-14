@@ -16,7 +16,7 @@ from project.project import OrchestratorAgent, OrchestratorAgentOutput, init_dat
 
 def _task(inputs: dict) -> OrchestratorAgentOutput:
     """Task function: run the orchestrator agent with the given query."""
-    orchestrator_agent = OrchestratorAgent(inputs["initial_date"])
+    orchestrator_agent = OrchestratorAgent()
     output = orchestrator_agent.process_customer_order(inputs["customer_request"])
     print(output.model_dump_json(indent=2))
     return output
@@ -83,17 +83,16 @@ class TestOrchestratorAgent(unittest.TestCase):
                 Case(
                     name="simple_request_no_order_date",
                     inputs={
-                        "customer_request": "I would like to order 5000 reams of A4 paper.",
-                        "initial_date": "2025-01-01"
+                        "customer_request": "I would like to order 5000 reams of A4 paper. (Date of request: 2025-01-01)",
                     },
                     expected_output=None,
                 ),
             ],
-            evaluators=[
+            evaluators=(
                 IsInstance(type_name="OrchestratorAgentOutput"),
                 HasReasonableTotal(min_amount=5000*0.05*.9, max_amount=5000*0.05),
-                HasDeliveryDate() # TODO: compute expected delivery date
-            ],
+                HasDeliveryDate()
+            ),
         )
         report = dataset.evaluate_sync(_task)
         report.print()
@@ -113,11 +112,11 @@ class TestOrchestratorAgent(unittest.TestCase):
                     expected_output=None,
                 ),
             ],
-            evaluators=[
+            evaluators=(
                 IsInstance(type_name="OrchestratorAgentOutput"),
                 HasReasonableTotal(min_amount=5000*0.05*.9, max_amount=5000*0.05),
                 HasDeliveryDate(expected_date="2025-01-08")
-            ],
+            ),
         )
         report = dataset.evaluate_sync(_task)
         report.print()
@@ -141,13 +140,45 @@ class TestOrchestratorAgent(unittest.TestCase):
                         "initial_date": "2025-01-01"
                     },
                     expected_output=None,
+                    evaluators=(
+                        IsInstance(type_name="OrchestratorAgentOutput"),
+                        HasDeliveryDate(),
+                        HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
+                    )
                 ),
-            ],
-            evaluators=[
-                IsInstance(type_name="OrchestratorAgentOutput"),
-                HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
-                HasDeliveryDate()
-            ],
+            ]
+        )
+        report = dataset.evaluate_sync(_task)
+        report.print()
+        self.assertEqual(len(report.failures), 0, "No task failures expected")
+        eval_report_cases(report)
+
+    def test_quote_request_3(self):
+        """Test request 3 from the quote_requests.csv file"""
+        a4_price = 10000 * 0.05 # from inventory
+        a3_price = 5000 * 0.10 # from history
+        printer_price = 500 * 0.05 # from history
+        total_base = a4_price + a3_price + printer_price
+
+        dataset = Dataset(
+            name="test_quote_request_3",
+            cases=[
+                Case(
+                    name="test_quote_request_3",
+                    inputs={
+                        "customer_request": "I need to order 10,000 sheets of A4 paper, 5,000 sheets of A3 paper, and 500 reams of printer paper. "
+                                            "The supplies must be delivered by April 15, 2025, for our upcoming conference. "
+                                            "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)",
+                        "initial_date": "2025-04-04"
+                    },
+                    expected_output=None,
+                    evaluators=(
+                        IsInstance(type_name="OrchestratorAgentOutput"),
+                        HasDeliveryDate(),
+                        HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
+                    )
+                ),
+            ]
         )
         report = dataset.evaluate_sync(_task)
         report.print()
