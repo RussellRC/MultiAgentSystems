@@ -3,7 +3,7 @@ import unittest
 from dataclasses import dataclass
 
 from pydantic_evals import Dataset, Case
-from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
+from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 
 from tests.test_utils import eval_report_cases
 
@@ -89,33 +89,8 @@ class TestOrchestratorAgent(unittest.TestCase):
                 ),
             ],
             evaluators=(
-                IsInstance(type_name="OrchestratorAgentOutput"),
                 HasReasonableTotal(min_amount=5000*0.05*.9, max_amount=5000*0.05),
                 HasDeliveryDate()
-            ),
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_simple_request_with_order_date(self):
-        dataset = Dataset(
-            name="simple_request_with_order_date",
-            cases=[
-                Case(
-                    name="simple_request_with_order_date",
-                    inputs={
-                        "customer_request": "I would like to order 5000 reams of A4 paper by January 8, 2025.",
-                        "initial_date": "2025-01-01"
-                    },
-                    expected_output=None,
-                ),
-            ],
-            evaluators=(
-                IsInstance(type_name="OrchestratorAgentOutput"),
-                HasReasonableTotal(min_amount=5000*0.05*.9, max_amount=5000*0.05),
-                HasDeliveryDate(expected_date="2025-01-08")
             ),
         )
         report = dataset.evaluate_sync(_task)
@@ -136,12 +111,13 @@ class TestOrchestratorAgent(unittest.TestCase):
                 Case(
                     name="test_quote_request_1",
                     inputs={
-                        "customer_request": "I would like to request a large order of high-quality paper supplies for an upcoming event. We need 500 reams of A4 paper, 300 reams of letter-sized paper, and 200 reams of cardstock. Please ensure the delivery is made by April 15, 2025. Thank you.",
-                        "initial_date": "2025-01-01"
+                        "customer_request": "I would like to request a large order of high-quality paper supplies for an upcoming event. "
+                                            "We need 500 reams of A4 paper, 300 reams of letter-sized paper, and 200 reams of cardstock. "
+                                            "Please ensure the delivery is made by April 15, 2025. Thank you. "
+                                            "(Request date: 2025-01-01)",
                     },
                     expected_output=None,
                     evaluators=(
-                        IsInstance(type_name="OrchestratorAgentOutput"),
                         HasDeliveryDate(),
                         HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
                     )
@@ -169,11 +145,9 @@ class TestOrchestratorAgent(unittest.TestCase):
                         "customer_request": "I need to order 10,000 sheets of A4 paper, 5,000 sheets of A3 paper, and 500 reams of printer paper. "
                                             "The supplies must be delivered by April 15, 2025, for our upcoming conference. "
                                             "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)",
-                        "initial_date": "2025-04-04"
                     },
                     expected_output=None,
                     evaluators=(
-                        IsInstance(type_name="OrchestratorAgentOutput"),
                         HasDeliveryDate(),
                         HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
                     )

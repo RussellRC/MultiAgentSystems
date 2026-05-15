@@ -10,24 +10,23 @@ _test_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_q
 os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 from pydantic_evals import Case, Dataset
-from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
+from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 
 from project.project import (
     init_database,
     DB_ENGINE,
     new_quoting_agent,
-    QuotingAgentOutput,
+    ItemQuote,
     get_supplier_delivery_date,
 )
 
 
-def _task(query: str) -> QuotingAgentOutput:
+def _task(query: str) -> ItemQuote:
     """Task function: run the quoting agent with the given query."""
     result = new_quoting_agent().run_sync(query)
-    output: QuotingAgentOutput = result.output
+    output: ItemQuote = result.output
     print(output.model_dump_json(indent=2))
     return output
-
 
 @dataclass
 class HasReasonableTotal(Evaluator):
@@ -36,13 +35,12 @@ class HasReasonableTotal(Evaluator):
     min_amount: float
     max_amount: float
     
-    def evaluate(self, ctx: EvaluatorContext[str, QuotingAgentOutput]):
+    def evaluate(self, ctx: EvaluatorContext[str, ItemQuote]):
         if ctx.output.quote_calculation.total_amount is None:
             return {"total_reasonable": False}
         return {
             "total_reasonable": self.min_amount <= ctx.output.quote_calculation.total_amount <= self.max_amount
         }
-
 
 @dataclass
 class HasExplanation(Evaluator):
@@ -50,34 +48,13 @@ class HasExplanation(Evaluator):
 
     expected_words: list[str] = None
 
-    def evaluate(self, ctx: EvaluatorContext[str, QuotingAgentOutput]):
+    def evaluate(self, ctx: EvaluatorContext[str, ItemQuote]):
         if not ctx.output.quote_explanation:
             return {"has_explanation": False}
         if not self.expected_words:
             return {"has_explanation": len(ctx.output.quote_explanation) > 0}
         explanation = ctx.output.quote_explanation.lower()
         return any(word.lower() in explanation for word in self.expected_words)
-
-
-@dataclass
-class HasDeliveryDate(Evaluator):
-    """Custom evaluator: assert that the estimated delivery date is in ISO format."""
-
-    expected_date: str = None
-
-    def evaluate(self, ctx: EvaluatorContext[str, QuotingAgentOutput]):
-        if not ctx.output.estimated_delivery_date:
-            return {"has_delivery_date": False}
-        try:
-            from datetime import date
-            # Try to parse as ISO format date
-            date.fromisoformat(ctx.output.estimated_delivery_date)
-            if self.expected_date:
-                return {"has_delivery_date": True, "date_valid": ctx.output.estimated_delivery_date == self.expected_date}
-            return {"has_delivery_date": True, "date_valid": True}
-        except (ValueError, TypeError):
-            return {"has_delivery_date": True, "date_valid": False}
-
 
 class TestQuotingAgent(unittest.TestCase):
 
@@ -106,7 +83,6 @@ class TestQuotingAgent(unittest.TestCase):
         """
         quantity = 100
         unit_price = 0.05
-        expected_date = get_supplier_delivery_date(date.today().isoformat(), quantity)
         dataset = Dataset(
             name="simple_quote_a4",
             cases=[
@@ -117,10 +93,8 @@ class TestQuotingAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="QuotingAgentOutput"),
                 HasReasonableTotal(min_amount=quantity*unit_price, max_amount=quantity*unit_price),
                 HasExplanation([str(quantity), "a4"]),
-                HasDeliveryDate(expected_date=expected_date),
             ],
         )
         report = dataset.evaluate_sync(_task)
@@ -147,10 +121,8 @@ class TestQuotingAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="QuotingAgentOutput"),
                 HasReasonableTotal(min_amount=400.0, max_amount=base_total - 0.01),
                 HasExplanation(expected_words=["discount", "bulk"]),
-                HasDeliveryDate(expected_date=delivery_date),
             ],
         )
         report = dataset.evaluate_sync(_task)
@@ -177,39 +149,8 @@ class TestQuotingAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="QuotingAgentOutput"),
                 HasReasonableTotal(min_amount=base_total*0.9, max_amount=base_total),
                 HasExplanation(["glossy", "a4"]),
-                HasDeliveryDate(expected_date=delivery_date),
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_simple_quote_a4_paper_with_order_date(self):
-        """
-        Test a quote with an order date
-        """
-        order_date = "2026-01-01"
-        quantity = 100
-        base_total = quantity * 0.05
-        expected_date = get_supplier_delivery_date(order_date, quantity)
-        dataset = Dataset(
-            name="simple_quote_a4",
-            cases=[
-                Case(
-                    name="quote_100_sheets_a4_with_date",
-                    inputs=f"I need a quote for {quantity} sheets of A4 paper with order date {order_date}",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="QuotingAgentOutput"),
-                HasReasonableTotal(min_amount=base_total * .9, max_amount=base_total),
-                HasExplanation(),
-                HasDeliveryDate(expected_date=expected_date),
             ],
         )
         report = dataset.evaluate_sync(_task)
@@ -220,15 +161,11 @@ class TestQuotingAgent(unittest.TestCase):
     def test_orchestrator_prompt_letter_sized_paper(self):
         item_name = "letter-sized paper"
         quantity = 300
-        delivery_date = "April 15, 2025"
-        order_date = "2025-01-01"
         base_total = quantity * 0.06
         prompt = (
-            "Please give me a quote. Here are the details about the customer request:\n"
+            "Please give me a quote for the following item of a customer request:\n"
             f"- Item name: {item_name}\n"
             f"- Quantity: {quantity}\n"
-            f"- Desired delivery date: {delivery_date}\n"
-            f"- Order date: {order_date}\n"
         )
 
         dataset = Dataset(
@@ -241,10 +178,8 @@ class TestQuotingAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="QuotingAgentOutput"),
                 HasReasonableTotal(min_amount=base_total*0.9, max_amount=base_total),
                 HasExplanation(),
-                HasDeliveryDate(expected_date="2025-01-05"),
             ],
         )
         report = dataset.evaluate_sync(_task)

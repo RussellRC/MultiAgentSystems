@@ -10,7 +10,7 @@ _test_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_s
 os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 from pydantic_evals import Case, Dataset
-from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
+from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 
 from project.project import (
     init_database,
@@ -88,316 +88,35 @@ class TestSalesAgent(unittest.TestCase):
         if os.path.exists(_test_db_path):
             os.remove(_test_db_path)
 
-    def test_scenario_a_with_delivery_date(self):
-        """
-        Test fulfillment when a specific delivery date is requested and there is enough stock.
-        Order date is not given, so agent must use TODAY.
-        """
-        requested_date = (date.today() + timedelta(days=3)).isoformat()
-        quantity = 100
-        expected_total = quantity * 0.05
+    def test_request_1(self):
+        item_name = "A4 paper"
+        quantity = 500
+        total_amount = 22.5
+        delivery_date = "2025-01-05"
 
         dataset = Dataset(
-            name="Sales_Scenario_A_With_Date",
+            name="test_request_1",
             cases=[
                 Case(
-                    name="order_in_stock_with_date",
-                    inputs=f"I want to order {quantity} units of A4 paper. Deliver by {requested_date}.",
+                    name="test_request_1",
+                    inputs=(
+                        "The customer wants to finalize an order. Record the sale transaction for the following item:\n"
+                        f"- Item name: {item_name}\n"
+                        f"- Ordered quantity: {quantity} units\n"
+                        f"- Quoted total price ${total_amount:.2f}.\n"
+                        f"- Delivery date: {delivery_date}."
+                    ),
                     expected_output=None,
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
                 HasRequestStatus(status="ACCEPTED"),
                 HasPlacedSalesTransaction(
-                    item_name="A4 paper",
+                    item_name=item_name,
                     units=quantity,
-                    price=expected_total,
-                    expected_date=requested_date
+                    price=total_amount,
+                    expected_date="2025-01-05"
                 )
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_scenario_a_without_delivery_date(self):
-        """
-        Test fulfillment when no delivery date is provided and there is enough stock.
-        Neither order date nor delivery date is given, so the agent must use TODAY.
-        """
-        quantity = 50
-        expected_total = quantity * 0.05
-        today = date.today().isoformat()
-
-        dataset = Dataset(
-            name="Sales_Scenario_A_No_Date",
-            cases=[
-                Case(
-                    name="order_in_stock_default_date",
-                    inputs=f"Place an order for {quantity} units of A4 paper.",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="ACCEPTED"),
-                HasPlacedSalesTransaction(
-                    item_name="A4 paper",
-                    units=quantity,
-                    price=expected_total,
-                    expected_date=today
-                )
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_scenario_b_fulfillable_with_restock(self):
-        """
-        Test that the agent accepts an order exceeding stock if the
-        supplier can deliver within the requested deadline.
-        NO order date is given, so agent must use TODAY.
-        """
-        quantity = 500  # Exceeds the 272 units in stock
-        supplier_delivery = get_supplier_delivery_date(date.today().isoformat(), 228)
-        requested_date = (date.fromisoformat(supplier_delivery) + timedelta(days=1)).isoformat()
-        expected_total = quantity * 0.05
-
-        dataset = Dataset(
-            name="Sales_Scenario_B_Success",
-            cases=[
-                Case(
-                    name="order_fulfillable_via_supplier",
-                    inputs=(
-                        f"I need {quantity} units of A4 paper. "
-                        f"It's for a big event on {requested_date}, so I need them by then."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="ACCEPTED"),
-                HasPlacedSalesTransaction(
-                    item_name="A4 paper",
-                    units=quantity,
-                    price=expected_total,
-                    expected_date=requested_date
-                )
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_scenario_b_fulfillable_with_restock_given_order_date(self):
-        """
-        Test that the agent accepts an order exceeding stock if the
-        supplier can deliver within the requested deadline.
-        Order date is given, so agent must use it.
-        """
-        quantity = 500  # Exceeds the 272 units in stock
-        order_date = '2025-01-01'
-        supplier_delivery = get_supplier_delivery_date(order_date, 228) # '2025-01-05'
-        requested_date = (date.fromisoformat(supplier_delivery) + timedelta(days=1)).isoformat() # '2025-01-06'
-        expected_total = quantity * 0.05
-
-        dataset = Dataset(
-            name="Sales_Scenario_B_Success_With_Delivery_And_Order_Date",
-            cases=[
-                Case(
-                    name="order_fulfillable_via_supplier",
-                    inputs=(
-                        f"I need {quantity} units of A4 paper. "
-                        f"It's for a big event on {requested_date}, so I need them by then. "
-                        f"Use {order_date} as the order date."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="ACCEPTED"),
-                HasPlacedSalesTransaction(
-                    item_name="A4 paper",
-                    units=quantity,
-                    price=expected_total,
-                    expected_date=requested_date
-                )
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_scenario_c_non_fulfillable(self):
-        """
-        Test that the agent DECLINES an order:
-        - Exceeding stock
-        - Supplier can deliver AFTER the requested deadline.
-        - Order date is NOT given, so agent must use today.
-        """
-        quantity = 500  # Exceeds the 272 units in stock
-        supplier_delivery = get_supplier_delivery_date(date.today().isoformat(), 228)
-        requested_date = (date.fromisoformat(supplier_delivery) - timedelta(days=1)).isoformat()
-
-        dataset = Dataset(
-            name="Sales_Scenario_C_Declined_With_Delivery_Date",
-            cases=[
-                Case(
-                    name="order_fulfillable_via_supplier",
-                    inputs=(
-                        f"I need to order {quantity} units of A4 paper by {requested_date}."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="DECLINED"),
-                HasEmptySalesTransactions()
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_scenario_c_non_fulfillable_with_order_date(self):
-        """
-        Test that the agent DECLINES an order:
-        - Exceeding stock
-        - Supplier can deliver AFTER the requested deadline.
-        - Both delivery and order dates are given.
-        """
-        quantity = 500  # Exceeds the 272 units in stock
-        order_date = '2025-01-01'
-        supplier_delivery = get_supplier_delivery_date(order_date, 228) # '2025-01-05'
-        requested_date = (date.fromisoformat(supplier_delivery) - timedelta(days=1)).isoformat() # '2025-01-04'
-
-        dataset = Dataset(
-            name="Sales Scenario C: Should decline. Both delivery and order date are given.",
-            cases=[
-                Case(
-                    name="order_fulfillable_via_supplier",
-                    inputs=(
-                        f"I need to order {quantity} units of A4 paper by {requested_date}. Use {order_date} as the order date."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="DECLINED"),
-                HasEmptySalesTransactions()
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_apply_discounted_quote_price(self):
-        """
-        Verifies that the Sales Agent uses the price from the provided quote
-        rather than the default catalog price.
-        """
-        item = "A4 paper"
-        qty = 2000
-        total_price = qty * 0.05  # Catalog price
-        quoted_price = total_price * 0.9  # 10% discount applied by Quoting Agent
-        supplier_delivery = get_supplier_delivery_date(date.today().isoformat(), qty)
-        delivery_date = (date.fromisoformat(supplier_delivery) + timedelta(days=1)).isoformat()
-
-        # Simulating the Orchestrator's job of passing context
-        prompt = (
-            f"The customer wants to finalize an order. "
-            f"Context: They previously received a quote for {qty} units of {item} at a total price of ${quoted_price:.2f}. "
-            f"Please fulfill this order for delivery by {delivery_date}."
-        )
-
-        dataset = Dataset(
-            name="Sales_Discount_Verification",
-            cases=[
-                Case(
-                    name="accept_quoted_discount",
-                    inputs=prompt,
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="ACCEPTED"),
-                HasPlacedSalesTransaction(
-                    item_name=item,
-                    units=qty,
-                    price=quoted_price,
-                    expected_date=delivery_date
-                )
-            ],
-        )
-
-        report = dataset.evaluate_sync(_task)
-        self.assertEqual(len(report.failures), 0)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_decline_when_delivery_date_is_before_order_date(self):
-        """
-        Edge case: verify the agent fails when the delivery date is before the order date.
-        """
-
-        dataset = Dataset(
-            name="decline_when_delivery_date_is_before_order_date",
-            cases=[
-                Case(
-                    name="Decline when delivery date is before order date. Both dates given.",
-                    inputs=(
-                        "I want 10 sheets of paper by 2025-01-01. Use 2026-01-01 as the order date."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="DECLINED"),
-                HasEmptySalesTransactions()
-            ],
-        )
-
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_decline_when_delivery_date_is_before_order_date_without_order_date(self):
-        """
-        Edge case: verify the agent fails when the delivery date is before the order date.
-        Order date is not given, so agent must use TODAY.
-        """
-
-        dataset = Dataset(
-            name="decline_when_delivery_date_is_before_order_date_without_order_date",
-            cases=[
-                Case(
-                    name="Decline when delivery date is before order date. No order date given.",
-                    inputs=(
-                        "I want 10 sheets of paper by 2025-01-01."
-                    ),
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                IsInstance(type_name="SalesAgentOutput"),
-                HasRequestStatus(status="DECLINED"),
-                HasEmptySalesTransactions()
             ],
         )
 

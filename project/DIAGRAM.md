@@ -26,7 +26,7 @@ flowchart TD
 
   subgraph "Tools by Agent"
     OrderProcessorAgent --> ProcTools["get_current_date\nget_all_item_names"]
-    QuotingAgent --> QuoteTools["get_all_item_names\nsearch_quote_history\nget_supplier_delivery_date\nestimates delivery based on quantity\nget_current_date"]
+    QuotingAgent --> QuoteTools["get_all_item_names\nsearch_quote_history\nget_inventory_items_by_name\n"]
     InventoryAgent --> InvTools["get_minimum_cash_balance\nget_inventory_items_by_name\nget_stock_level\nget_all_inventory\nget_supplier_delivery_date,\ncreate_transaction,\nget_current_date,\nget_cash_balance"]
     SalesAgent --> SalesTools["get_all_item_names\nget_inventory_items_by_name\nget_stock_level\nget_supplier_delivery_date\ncreate_transaction\nget_current_date"]
   end
@@ -70,18 +70,6 @@ SalesAgent: Fulfill the order and update the financial ledger.
 
 
 ### Request examples
-- Example: "what is the current stock of paper plates"
-  - Type: Stock / Inventory query
-  - Handled by: Inventory Agent
-
-- Example: "I need 500 sheets of glossy paper"
-  - Type: Quote Request 
-  - Handled by: Quotes Agent
-
-- Example: "I would like to place an order for..."
-  - Type: Order purchase
-  - Handled by: Sales Agent
-
 - Example: "500 A4 paper, 300 cardstock, 200 washi tape"
   - Type: Complex multi-item
   - Handled by: Orchestrator --> Order Processor Agent --> Quoting Agent (pricing) --> Inventory Agent (stock keeping) --> Sales Agent (fulfill)

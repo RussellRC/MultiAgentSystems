@@ -10,7 +10,6 @@ from project.project import (
     DB_ENGINE,
     create_transaction,
     get_inventory_items_by_name,
-    update_inventory_item_stock,
     get_stock_level, search_quote_history
 )
 
@@ -70,33 +69,6 @@ class TestTools(unittest.TestCase):
 
     def test_get_inexistent_inventory_item_returns_none(self):
         self.assertIsNone(get_inventory_items_by_name(["non existent item"]))
-
-    def test_update_inventory_item_stock(self):
-        # Since the inventory is randomized by seed=137, we can just get the first item
-        from sqlalchemy import text
-        with DB_ENGINE.connect() as conn:
-            result = conn.execute(text("SELECT item_name, current_stock FROM inventory LIMIT 1"))
-            row = result.fetchone()
-
-        self.assertIsNotNone(row, "Inventory must not be empty")
-        item_name, old_stock = row[0], row[1]
-
-        # Test get tool
-        items = get_inventory_items_by_name([item_name])
-        self.assertIsNotNone(items, f"Inventory for {item_name} must not be empty")
-        self.assertEqual(len(items), 1)
-        item = items[0]
-        self.assertEqual(item.current_stock, old_stock)
-        self.assertEqual(item.item_name.lower(), item_name.lower())
-
-        # Test update tool
-        new_stock = old_stock - 10
-        updated_item = update_inventory_item_stock(item_name, new_stock)
-        self.assertEqual(updated_item.current_stock, new_stock)
-
-        # Verify it persisted in DB
-        fetched_items = get_inventory_items_by_name([item_name])
-        self.assertEqual(fetched_items[0].current_stock, new_stock)
 
     def test_get_stock_level(self):
         stock_level = get_stock_level("PAPER plaTes", "2026-01-01")

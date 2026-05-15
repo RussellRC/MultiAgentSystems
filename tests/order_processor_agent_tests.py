@@ -11,20 +11,19 @@ _test_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_o
 os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path}?check_same_thread=False"
 
 from pydantic_evals import Case, Dataset
-from pydantic_evals.evaluators import Evaluator, EvaluatorContext, IsInstance
+from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 
 from project.project import (
     init_database,
     DB_ENGINE,
     new_order_processor_agent,
     CustomerRequestDetails,
-    ORDER_PROCESSOR_INSTRUCTIONS
 )
 
 
 def _task(query: str) -> CustomerRequestDetails:
     """Task function: run the Order Procesor agent with the given query."""
-    result = new_order_processor_agent().run_sync(user_prompt=query, instructions=ORDER_PROCESSOR_INSTRUCTIONS)
+    result = new_order_processor_agent().run_sync(user_prompt=query)
     output: CustomerRequestDetails = result.output
     print(output.model_dump_json(indent=2))
     return output
@@ -112,7 +111,6 @@ class TestInventoryAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="CustomerRequestDetails"),
                 HasExpectedRequiredFields(
                     request_status="ACCEPTED",
                     items={
@@ -141,7 +139,6 @@ class TestInventoryAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="CustomerRequestDetails"),
                 HasExpectedRequiredFields(
                     request_status="ACCEPTED",
                     items={
@@ -172,7 +169,6 @@ class TestInventoryAgent(unittest.TestCase):
                 ),
             ],
             evaluators=[
-                IsInstance(type_name="CustomerRequestDetails"),
                 HasExpectedRequiredFields(
                     request_status="ACCEPTED",
                     items={
