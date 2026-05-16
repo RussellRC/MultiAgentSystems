@@ -1,6 +1,6 @@
 # Project Overview
 
-<img src="img.png" alt="drawing" width="200"/>
+<img src="../project/img.png" alt="drawing" width="200"/>
 
 ## The Beaver's Choice Paper Company Needs Your Help!
 

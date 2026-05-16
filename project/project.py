@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
-from typing import Dict, List
+from typing import Dict, List, cast
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ from sqlalchemy import create_engine, Engine, bindparam
 from sqlalchemy.sql import text
 
 # Configure logging
+_DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger("project")
 logHandler = logging.StreamHandler()
 formatter = JsonFormatter(
@@ -36,7 +37,9 @@ def _load_log_levels() -> dict:
     if os.path.exists(config_path):
         with open(config_path) as f:
             return yaml.safe_load(f).get("log_levels", {})
-
+    return {
+        "root": "INFO"
+    }
 
 _log_levels = _load_log_levels()
 
@@ -283,14 +286,14 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         # ----------------------------
         # 2. Load and initialize 'quote_requests' table
         # ----------------------------
-        quote_requests_df = pd.read_csv("quote_requests.csv")
+        quote_requests_df = pd.read_csv(os.path.join(_DATA_DIR, "quote_requests.csv"))
         quote_requests_df["id"] = range(1, len(quote_requests_df) + 1)
         quote_requests_df.to_sql("quote_requests", db_engine, if_exists="replace", index=False)
 
         # ----------------------------
         # 3. Load and transform 'quotes' table
         # ----------------------------
-        quotes_df = pd.read_csv("quotes.csv")
+        quotes_df = pd.read_csv(os.path.join(_DATA_DIR, "quotes.csv"))
         quotes_df["request_id"] = range(1, len(quotes_df) + 1)
         quotes_df["order_date"] = initial_date
 
@@ -356,7 +359,7 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         logger.error("Error initializing database.", exc_info=True)
         raise
 
-def create_transaction(item_name: str, transaction_type: str, quantity: int, price: float, date: str | datetime,) -> FinancialTransaction:
+def create_transaction(item_name: str, transaction_type: str, quantity: int, price: float, transaction_date: str | datetime, ) -> FinancialTransaction:
     """
     This function records a financial transaction of type 'stock_orders' or 'sales' with a specified
     item name, quantity, total price, and transaction date into the 'transactions' table of the database.
@@ -366,7 +369,7 @@ def create_transaction(item_name: str, transaction_type: str, quantity: int, pri
         transaction_type (str): Either 'stock_orders' or 'sales'.
         quantity (int): Number of units involved in the transaction.
         price (float): Total price of the transaction.
-        date (str or datetime): Date of the transaction in ISO 8601 format.
+        transaction_date (str or datetime): Date of the transaction in ISO 8601 format.
 
     Returns:
         FinancialTransaction: The transaction that was created.
@@ -378,11 +381,11 @@ def create_transaction(item_name: str, transaction_type: str, quantity: int, pri
     logger.debug(
         "FUNC (create_transaction): Creating transaction.",
         extra={"item_name": item_name, "transaction_type": transaction_type, "quantity": quantity, "price": price,
-               "date": date}
+               "date": transaction_date}
     )
     try:
         # Convert datetime to ISO string if necessary
-        date_str = date.isoformat() if isinstance(date, datetime) else date
+        date_str = transaction_date.isoformat() if isinstance(transaction_date, datetime) else transaction_date
 
         # Validate transaction type
         if transaction_type not in {"stock_orders", "sales"}:
@@ -721,10 +724,10 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     # Execute parameterized query
     with DB_ENGINE.connect() as conn:
         result = conn.execute(text(query), params)
-        list = [dict(row._mapping) for row in result]
-        logger.debug(f"FUNC (search_quote_history): Returning quote history. Found {len(list)} records.",
+        matching_quotes = [dict(row._mapping) for row in result]
+        logger.debug(f"FUNC (search_quote_history): Returning quote history. Found {len(matching_quotes)} records.",
                      extra={"search_terms": search_terms, "limit": limit})
-        return list
+        return matching_quotes
 
 
 ###############################
@@ -1025,10 +1028,6 @@ client = AsyncOpenAI(
 
 gpt_4o_mini = OpenAIChatModel(
     'gpt-4o-mini',
-    provider=OpenAIProvider(openai_client=client)
-)
-gpt_4o = OpenAIChatModel(
-    'gpt-4o',
     provider=OpenAIProvider(openai_client=client)
 )
 
@@ -1634,6 +1633,7 @@ class OrchestratorAgent:
             logger.error(f"Error processing customer order.", exc_info=True,
                          extra={"customer_message": customer_message})
             return OrchestratorAgentOutput(
+                order_status="DECLINED",
                 customer_response="I'm sorry, we encountered an error processing your order. Please try again later or contact customer service.",
                 total_amount=-1,
                 request_metadata=None
@@ -1646,7 +1646,7 @@ def run_test_scenarios():
     logger.info("Initializing Database...")
     init_database(DB_ENGINE)
     try:
-        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+        quote_requests_sample = pd.read_csv(os.path.join(_DATA_DIR, "quote_requests_sample.csv"))
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
         )
@@ -1654,7 +1654,7 @@ def run_test_scenarios():
         quote_requests_sample = quote_requests_sample.sort_values("request_date")
     except Exception as e:
         logger.error("FATAL: Error loading test data", exc_info=True)
-        return
+        return None
 
     # Get initial state
     initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
@@ -1672,7 +1672,8 @@ def run_test_scenarios():
     ############
 
     results = []
-    for idx, row in quote_requests_sample.iterrows():
+    for index, row in quote_requests_sample.iterrows():
+        idx = cast(int, index)
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx + 1} ===")

@@ -25,10 +25,10 @@ flowchart TD
   Orchestrator --> SystemOutput([System Response])
 
   subgraph "Tools by Agent"
-    OrderProcessorAgent --> ProcTools["get_current_date\nget_all_item_names"]
+    OrderProcessorAgent --> ProcTools["get_all_item_names\nget_current_date\n"]
     QuotingAgent --> QuoteTools["get_all_item_names\nsearch_quote_history\nget_inventory_items_by_name\n"]
-    InventoryAgent --> InvTools["get_minimum_cash_balance\nget_inventory_items_by_name\nget_stock_level\nget_all_inventory\nget_supplier_delivery_date,\ncreate_transaction,\nget_current_date,\nget_cash_balance"]
-    SalesAgent --> SalesTools["get_all_item_names\nget_inventory_items_by_name\nget_stock_level\nget_supplier_delivery_date\ncreate_transaction\nget_current_date"]
+    InventoryAgent --> InvTools["analyze_order_stock_requirements\order_shortage_from_supplier\nreplenish_to_minimum"]
+    SalesAgent --> SalesTools["create_transaction"]
   end
 
   subgraph "Data Source"
