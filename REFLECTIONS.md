@@ -97,6 +97,13 @@ Debugging the "black box" agent reasoning was the primary pain point of this pro
 * **Logfire Integration:** As noted in the Pydantic-AI documentation, integrating a production-grade tool like Logfire 
   would provide the visual traces needed to debug complex reasoning loops and tool-call sequences efficiently.
 
+**Request Prioritization and Intelligent Queuing**
+While the current implementation extracts metadata such as customer mood, job type, event type, and "need size" from the requests,
+this data is not used at all for workflow control.\
+A production-grade version could use these signals to implement Priority Queuing. 
+For example, requests marked as "Urgent" or originating from high-volume users could be routed to 
+higher-tier models (like GPT-4o) or prioritized in the processing pipeline to ensure faster fulfillment and higher service standards.
+
 **Interactive & Asynchronous Workflows**\
 The application is currently a "request-response" system focused solely on order fulfillment.
 * **Conversational Logic:** I would love a more agentic loop where the system could ask clarifying questions rather than assuming or failing,
