@@ -1,7 +1,6 @@
 import os
 import unittest
 from dataclasses import dataclass
-from datetime import date, timedelta
 
 from tests.test_utils import eval_report_cases
 
@@ -17,7 +16,6 @@ from project.project import (
     DB_ENGINE,
     new_sales_agent,
     SalesAgentOutput,
-    get_supplier_delivery_date,
 )
 
 def _task(query: str) -> SalesAgentOutput:
@@ -56,6 +54,24 @@ class HasPlacedSalesTransaction(Evaluator):
                     continue
                 return {"transaction_verified": True}
         return {"transaction_verified": False}
+
+@dataclass
+class HasSalesTransactionsOnly(Evaluator):
+    def evaluate(self, ctx: EvaluatorContext[str, SalesAgentOutput]):
+        return {
+            "has_sales_transactions_only": all(
+                transaction.transaction_type == "sales" for transaction in ctx.output.placed_transactions
+            )
+        }
+
+@dataclass
+class HasPlacedTransactionsSize(Evaluator):
+    size: int
+
+    def evaluate(self, ctx: EvaluatorContext[str, SalesAgentOutput]):
+        return {
+            "has_placed_transactions_size": self.size == len(ctx.output.placed_transactions)
+        }
 
 @dataclass
 class HasEmptySalesTransactions(Evaluator):
@@ -105,12 +121,13 @@ class TestSalesAgent(unittest.TestCase):
                         f"- Ordered quantity: {quantity} units\n"
                         f"- Quoted total price ${total_amount:.2f}.\n"
                         f"- Delivery date: {delivery_date}."
-                    ),
-                    expected_output=None,
+                    )
                 ),
             ],
             evaluators=[
                 HasRequestStatus(status="ACCEPTED"),
+                HasSalesTransactionsOnly(),
+                HasPlacedTransactionsSize(1),
                 HasPlacedSalesTransaction(
                     item_name=item_name,
                     units=quantity,

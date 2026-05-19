@@ -2,6 +2,7 @@ import json
 import os
 import unittest
 from dataclasses import dataclass
+from typing import List
 
 from tests.test_utils import eval_report_cases
 
@@ -16,7 +17,11 @@ from project.project import (
     init_database,
     DB_ENGINE,
     new_inventory_agent,
-    InventoryAgentOutput
+    InventoryAgentOutput,
+    FinancialTransaction,
+    get_inventory_items_by_name,
+    get_stock_level,
+    InventorySnapshot, get_supplier_delivery_date
 )
 
 
@@ -29,93 +34,59 @@ def _task(query: str) -> InventoryAgentOutput:
 
 
 @dataclass
-class HasInventoryItem(Evaluator):
-    """Custom evaluator: assert that the agent output contains an inventory item
-    matching the given item_name."""
-
-    item_name: str
-
+class HasStockOrdersTransactionsOnly(Evaluator):
     def evaluate(self, ctx: EvaluatorContext[str, InventoryAgentOutput]):
-        for item in ctx.output.inventory_items:
-            if item.item_name.lower() == self.item_name.lower():
-                return {
-                    "item_found": True,
-                    "category_matches": item.category is not None,
-                    "has_unit_price": item.unit_price is not None,
-                    "has_min_stock_level": item.min_stock_level is not None,
-                }
-        return {"item_found": False}
+        return {
+            "has_stock_orders_transactions_only": all(
+                transaction.transaction_type == "stock_orders" for transaction in ctx.output.placed_transactions
+            )
+        }
 
 
 @dataclass
-class HasCalculatedStockLevel(Evaluator):
-    """Custom evaluator: assert that the agent output contains a calculated stock level
-    for the given item_name with the expected stock value."""
-
-    item_name: str
-    expected_stock: int
+class HasPlacedTransactionsSize(Evaluator):
+    size: int
 
     def evaluate(self, ctx: EvaluatorContext[str, InventoryAgentOutput]):
-        if not ctx.output.calculated_stock_levels or not ctx.output.calculated_stock_levels.items:
-            return {"stock_level_correct": False}
-        if ctx.output.calculated_stock_levels.items.get(self.item_name) == self.expected_stock:
-            return {"stock_level_correct": True}
-        return {"stock_level_correct": False}
+        return {
+            "has_placed_transactions_size": self.size == len(ctx.output.placed_transactions)
+        }
+
+
+def compare_transactions(expected: FinancialTransaction, actual: FinancialTransaction, ) -> bool:
+    if expected.item_name.lower() != actual.item_name.lower():
+        return False
+    if expected.transaction_type != actual.transaction_type:
+        return False
+    if expected.units != actual.units:
+        return False
+    if expected.price != actual.price:
+        return False
+    if expected.transaction_date != actual.transaction_date:
+        return False
+
+    return True
+
+
+def check_all_exist(subset_list, main_list):
+    # all() returns True if the inner condition is met for every element in subset_list
+    return all(
+        any(compare_transactions(sub_item, main_item) for main_item in main_list)
+        for sub_item in subset_list
+    )
 
 
 @dataclass
-class HasPlacedTransaction(Evaluator):
+class HasPlacedTransactions(Evaluator):
     """Custom evaluator: assert that the agent's output contains a placed
     stock_orders transaction for the given item."""
 
-    item_name: str | None = None
-    units: int | None = None
-    price: float | None = None
-    transaction_date: str | None = None
-    empty_transactions_expected: bool = False
+    expected_transactions: List[FinancialTransaction]
 
     def evaluate(self, ctx: EvaluatorContext[str, InventoryAgentOutput]):
-        if self.empty_transactions_expected:
-            if not ctx.output.placed_transactions:
-                return {"expected_empty_transactions": True}
-            return {"expected_empty_transactions": False}
-
-        for placed_transaction in ctx.output.placed_transactions:
-            # Check transaction type
-            if placed_transaction.transaction_type != "stock_orders":
-                continue
-
-            # Check item_name (if specified)
-            if self.item_name and placed_transaction.item_name.lower() != self.item_name.lower():
-                continue
-
-            # Check units (if specified)
-            if self.units is not None and placed_transaction.units != self.units:
-                continue
-
-            # Check price (if specified)
-            if self.price is not None and placed_transaction.price != self.price:
-                continue
-
-            # Check transaction_date (if specified)
-            if self.transaction_date is not None and placed_transaction.transaction_date != self.transaction_date:
-                continue
-
-            return {"expected_transaction_found": True}
-
-        return {"expected_transaction_found": False}
-
-
-@dataclass
-class HasQueriedItems(Evaluator):
-    """Custom evaluator: assert that the agent output contains at least
-    the expected number of inventory items (showing it queried inventory)."""
-
-    min_items: int
-
-    def evaluate(self, ctx: EvaluatorContext[str, InventoryAgentOutput]):
-        count = len(ctx.output.inventory_items)
-        return {"queried_enough_items": count >= self.min_items}
+        return {
+            "has_placed_transactions": check_all_exist(self.expected_transactions, ctx.output.placed_transactions)
+        }
 
 
 @dataclass
@@ -128,6 +99,7 @@ class HasMessage(Evaluator):
         return {
             "message_found": any(self.expected_message in msg for msg in ctx.output.messages)
         }
+
 
 class TestInventoryAgent(unittest.TestCase):
 
@@ -151,31 +123,70 @@ class TestInventoryAgent(unittest.TestCase):
         if os.path.exists(_test_db_path):
             os.remove(_test_db_path)
 
-    @unittest.skip("TODO")
-    def test_prompt_from_orchestrator(self):
-        delivery_date = "2025-01-08"
-        initial_date = "2025-01-01"
-        items = {
-            "A4 paper": 5000
-        }
+    def test_quote_request_1(self):
+        delivery_date = "2025-04-15"
+        request_date = "2025-04-01"
+        items = [
+            {
+                "item_name": "A4 glossy paper",
+                "quantity": 200,
+                "unit_price": 0.2,
+                "total_amount": 36.0
+            },
+            {
+                "item_name": "heavy cardstock",
+                "quantity": 100,
+                "unit_price": 0.15,
+                "total_amount": 13.5
+            },
+            {
+                "item_name": "colored paper",
+                "quantity": 100,
+                "unit_price": 0.1,
+                "total_amount": 10.0
+            }
+        ]
         prompt = (
-            "A customer has placed an order with the details below. Please check the inventory stock levels for each item and replenish as needed following your rules.\n"
+            "A customer has placed an order and we have generated the quote below. Please ensure the order can be fulfilled and replenish the inventory as needed following your rules.\n"
             f"- Desired delivery date: {delivery_date}\n"
-            f"- Order date: {initial_date}\n"
-            f"- Items (in JSON format):\n"
+            f"- Order Request Date: {request_date}\n"
+            f"- Total base amount: 65.0\n"
+            "- Total quoted amount: 59.5\n"
+            "- Individual item quotes (in JSON format):\n"
             f"{json.dumps(items)}"
         )
 
         dataset = Dataset(
-            name="prompt from orchestrator: A4 5000",
+            name="test_quote_request_1",
             cases=[
                 Case(
-                    name="prompt from orchestrator: A4 5000",
-                    inputs=prompt,
-                    expected_output=None,
+                    name="test_quote_request_1",
+                    inputs=prompt
                 ),
             ],
             evaluators=[
+                HasStockOrdersTransactionsOnly(),
+                # THERE MUST BE ONLY 2 TRANSACTIONS.
+                # The current stock of 'colored paper' is 788, so there is enough to fulfill the order.
+                HasPlacedTransactionsSize(2),
+                HasPlacedTransactions([
+                    # A4 glossy paper doesn't exist in inventory, so full amount should be ordered from supplier
+                    FinancialTransaction(
+                        item_name="A4 glossy paper",
+                        transaction_type="stock_orders",
+                        units=200,
+                        price=200 * 0.2,
+                        transaction_date=delivery_date
+                    ),
+                    # heavy cardstock doesn't exist in inventory, so full amount should be ordered from supplier
+                    FinancialTransaction(
+                        item_name="heavy cardstock",
+                        transaction_type="stock_orders",
+                        units=100,
+                        price=100 * 0.15,
+                        transaction_date=delivery_date
+                    ),
+                ])
             ],
         )
         report = dataset.evaluate_sync(_task)
@@ -183,42 +194,68 @@ class TestInventoryAgent(unittest.TestCase):
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
 
-    @unittest.skip("INVENTORY AGENT NO LONGER RESPONDS TO THIS KIND OF REQUEST")
-    def test_stock_level_at_date(self):
-        """The agent should correctly compute stock levels as of a given date."""
-        dataset = Dataset(
-            name="stock_level_at_date",
-            cases=[
-                Case(
-                    name="stock_level_2026",
-                    inputs="What is the stock level of Paper plates as of 2026-01-01?",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                HasCalculatedStockLevel(item_name="Paper plates", expected_stock=748),
-                HasPlacedTransaction(empty_transactions_expected=True)
-            ],
+    def test_replenish_to_minimum(self):
+        """Test that Inventory Agent autonomously replenishes an item to min stock level"""
+        item_name = "Kraft paper"
+        request_date = "2025-04-01"
+        inventory_items = get_inventory_items_by_name(["Kraft paper"])
+        self.assertEqual(len(inventory_items), 1)
+        self.assertEqual(inventory_items[0].unit_price, 0.1)
+        self.assertEqual(inventory_items[0].min_stock_level, 64)
+
+        # get stock level
+        inventory_snapshot: InventorySnapshot = get_stock_level(item_name, request_date)
+        self.assertIsNotNone(inventory_snapshot)
+        self.assertEqual(len(inventory_snapshot.items), 1)
+
+        stock = inventory_snapshot.items[item_name]
+        self.assertEqual(stock, 493)
+
+        # order quantity & date to get stock below min level
+        quantity = 439 # This will bring level to 54
+        delivery_date = get_supplier_delivery_date(request_date, quantity)
+        quoted_price = round(quantity * inventory_items[0].unit_price * .9, 2) # 10% discount
+
+        items = [
+            {
+                "item_name": item_name,
+                "quantity": quantity,
+                "unit_price": inventory_items[0].unit_price,
+                "total_amount": quoted_price
+            }
+        ]
+        prompt = (
+            "A customer has placed an order and we have generated the quote below. Please ensure the order can be fulfilled and replenish the inventory as needed following your rules.\n"
+            f"- Desired delivery date: {delivery_date}\n"
+            f"- Order Request Date: {request_date}\n"
+            f"- Total base amount: {quantity * inventory_items[0].unit_price}\n"
+            f"- Total quoted amount: {quoted_price}\n"
+            "- Individual item quotes (in JSON format):\n"
+            f"{json.dumps(items)}"
         )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
 
-
-    def test_restock_order_happy_path(self):
-        """Test that the agent can create a restock order when all necessary fields are provided."""
         dataset = Dataset(
-            name="restock_order_happy_path",
+            name="replenish_to_minimum",
             cases=[
                 Case(
-                    name="reorder_with_all_fields",
-                    inputs="Please reorder 200 units of Paper plates for delivery with order date of 2026-01-01.",
-                    expected_output=None,
+                    name="replenish_to_minimum",
+                    inputs=prompt
                 ),
             ],
             evaluators=[
-                HasPlacedTransaction(item_name="Paper plates", units=200, price=20.0, transaction_date="2026-01-05"),
+                HasStockOrdersTransactionsOnly(),
+                # THERE MUST BE 1 TRANSACTION.
+                # There's enough stock to fulfill the order, but will bring the stock level down to 54 (10 below min)
+                HasPlacedTransactionsSize(1),
+                HasPlacedTransactions([
+                    FinancialTransaction(
+                        item_name=item_name,
+                        transaction_type="stock_orders",
+                        units=10,
+                        price=10 * inventory_items[0].unit_price,
+                        transaction_date=delivery_date
+                    ),
+                ])
             ],
         )
         report = dataset.evaluate_sync(_task)

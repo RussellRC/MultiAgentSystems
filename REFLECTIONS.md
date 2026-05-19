@@ -2,23 +2,23 @@
 
 ## Framework Selection
 I did a quick deep dive into the proposed options before settling on my stack.
-I looked at `npcpy`, but it’s really built for heavy-duty data science and mathematical workflows (`NumPy`/`Pandas`).\
+I looked at `npcpy`, but it's really built for heavy-duty data science and mathematical workflows (`NumPy`/`Pandas`).\
 Since this project is focused on business logic and inventory orchestration, `npcpy` felt like a "wrong tool for the job".
 
 I decided to go with `Pydantic-AI` instead for a few practical reasons:
 
 **Intuitive Abstractions**\
 While reading the documentation, it was fairly easy to understand.\
-The way it encompasses and handles all the main concepts and functionality that we learned throughout the program
+The way Pydantic-AI encompasses and handles all the main concepts and functionality that we learned throughout the program
 (`RunContext`, different prompt types, thinking, tool definitions, evaluation, etc.) seemed very straightforward to me.
 
 **Type Safety**\
-Since we’ve used `Pydantic` throughout this program, it felt natural.\
-Later on, I realized that it’s great at keeping the data clean and preventing the agents
+Since we've used `Pydantic` models throughout this program, choosing Pydantic-AI felt natural.\
+Later on, I realized that it's great at keeping the data clean and preventing the agents
 from "hallucinating" prices or stock numbers (more on that below).
 
 **Learning Something New**\
-We used `smolagents` in Course 4, so I saw this as a great opportunity to expand my technical breadth.
+We used `smolagents` in Course 4, so I saw this as a great opportunity to learn something on my own.
 
 
 ## Design decisions
@@ -66,9 +66,33 @@ This proved to be the most effective and cost-efficient implementation given the
 > I tried very, very hard, but just couldn't craft a good enough prompt to make the Inventory Agent successfully and consistently 
 > handle the complexity of all the computing and business logic done in those functions.
 
+## Result Report analysis
+
+### Weaknesses
+* Sometimes the **Order Processor Agent**** fails to identify the requested delivery date.
+* Sometimes the **Order Processor Agent**** struggles to find the best name match for the items, which is understandable. 
+* When the order is not fulfillable due to inability to meet quantities by the desired delivery date,
+  sometimes the **Orchestrator Agent** wrongly states that it has placed orders to replenish the inventory.
+* Depending on the step where the workflow fails, sometimes the **Orchestrator Agent** is unable to fill out the `delivery_date` field in the response.
+  This is also somewhat understandable because that date is passed around a lot both in the inputs and outputs.
+
+### Strengths
+* The human-readable answer of the agent is always consistent with the structured part of the response.
+* The whole workflow is quite deterministic, thanks to the usage of Pydantic models and "fat" tools.
+
 
 ## Areas of improvement for the project
-**Atomicity and Consistency**\
+### Tech debt
+* **MORE unit tests**
+  * More edge-case testing for all individual agent tests
+  * Make it possible to test the orchestrator workflow partially
+* Some prompts are a bit brittle as they reference specific fields of the response, which should not be necessary if the Pydantic models have good descriptions
+* Create output validators for all the agents (if idempotency is possible)
+* Consider including the intermediate structured responses in the final response to make the LLMJudge evaluate full consistency of the workflow and response 
+* Ensure that every tool receives and returns Pydantic models.
+* Correlation IDs for request tracing in the logs
+
+### Atomicity and Consistency
 The current system lacks transactional integrity. Because the workflow spans multiple agent calls and database writes, 
 a failure in the middle of a sale could result in "orphan" transactions (e.g., `stock_order` transaction is created but the corresponding `sales` one is not).
 * **Idempotency & Compensation:** Most tools are not currently idempotent. 
@@ -77,7 +101,7 @@ a failure in the middle of a sale could result in "orphan" transactions (e.g., `
   To support a multi-user environment, I would need to implement distributed locking or optimistic concurrency control 
   to prevent race conditions (imagine the chaos if two users tried to buy the last ream of A4 paper simultaneously 😉).
 
-**Intelligent Context & Session Persistence**\
+### Intelligent Context & Session Persistence
 While I chose a stateless architecture for simplicity, the system would benefit from a more sophisticated memory layer. 
 * **Shared Context:** Implementing a shared state would allow agents to access immutable data 
   (like the `CustomerRequestDetails` or the `OrderQuote`) without having to pass DTOs and variables back and forth.
@@ -85,42 +109,32 @@ While I chose a stateless architecture for simplicity, the system would benefit 
   Integrating a persistent Thread/Session Management layer would allow the agent to remember the customer's specific preferences
   or follow up on previous orders across different days.
 
-**Advanced Retrieval (RAG) for Pricing**\
+### Advanced Retrieval (RAG) for Pricing
 The `search_quote_history` tool currently relies on basic database queries. 
 For non-specific items like "high-quality colored glossy paper", the Quoting Agent struggles to find relevant historical matches
 and get the correct (or most accurate) unit price.
 * **Semantic Search:** Upgrading the RAG mechanism to use Vector Embeddings would allow the agent to find "spiritually similar"
   items even when the exact name doesn't match, leading to much more accurate and competitive pricing for custom requests.
 
-**Observability and Debugging**\
+### Observability and Debugging
 Debugging the "black box" agent reasoning was the primary pain point of this project.
 * **Logfire Integration:** As noted in the Pydantic-AI documentation, integrating a production-grade tool like Logfire 
   would provide the visual traces needed to debug complex reasoning loops and tool-call sequences efficiently.
 
-**Request Prioritization and Intelligent Queuing**
+### Request Prioritization and Intelligent Queuing
 While the current implementation extracts metadata such as customer mood, job type, event type, and "need size" from the requests,
 this data is not used at all for workflow control.\
 A production-grade version could use these signals to implement Priority Queuing. 
 For example, requests marked as "Urgent" or originating from high-volume users could be routed to 
 higher-tier models (like GPT-4o) or prioritized in the processing pipeline to ensure faster fulfillment and higher service standards.
 
-**Interactive & Asynchronous Workflows**\
+### Interactive & Asynchronous Workflows
 The application is currently a "request-response" system focused solely on order fulfillment.
 * **Conversational Logic:** I would love a more agentic loop where the system could ask clarifying questions rather than assuming or failing,
   e.g., _"Did you want the high-quality colored glossy A4, A3, or Cardstock paper?"_ 
 * **Full Lifecycle Management:** Expanding the domain to handle order tracking, returns, and proactive stock alerts 
   would transform the tool from a "dumb sales bot" into a comprehensive Beaver's Choice Business Assistant Almighty.
 
-**Tech debt**
-* Some prompts are brittle as they reference specific fields of the response, which might not be needed if the Pydantic models have good descriptions
-* Create output validators for all the agents
-* More unit tests
-  * Make it possible to test the orchestrator workflow partially
-  * Edge-cases for all individual agent tests
-* More evaluators (with scores).
-  * LLM Judge maybe?
-* Ensure that every tool returns a Pydantic model.
-* Correlation IDs for request tracing in the logs
 
 ## Key takeaways
 

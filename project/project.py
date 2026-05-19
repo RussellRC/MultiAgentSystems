@@ -1,22 +1,26 @@
 import ast
+import json
 import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
-from typing import Dict, List, cast
+from typing import Dict, List, cast, Any, Annotated
 
 import numpy as np
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
+from nocasedict import NocaseDict
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ConfigDict, TypeAdapter
-from pydantic_ai import Agent, ModelRetry, RunContext, Tool
+from pydantic import BaseModel, Field, ConfigDict, TypeAdapter, BeforeValidator
+from pydantic_ai import Agent, ModelRetry, RunContext, Tool, AgentRunResult, ModelSettings
 from pydantic_ai.capabilities import Thinking
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_evals.evaluators import LLMJudge, EvaluatorContext, EvaluationReason
+from pydantic_evals.otel import SpanTree
 from pythonjsonlogger.json import JsonFormatter
 from sqlalchemy import create_engine, Engine, bindparam
 from sqlalchemy.sql import text
@@ -40,6 +44,7 @@ def _load_log_levels() -> dict:
     return {
         "root": "INFO"
     }
+
 
 _log_levels = _load_log_levels()
 
@@ -123,18 +128,28 @@ PAPER_SUPPLIES = [
 # MODEL CLASSES #
 #################
 
+def validate_nocase_dict(value: Any) -> NocaseDict:
+    if isinstance(value, NocaseDict):
+        return value
+    if isinstance(value, dict):
+        return NocaseDict(value)
+    raise ValueError("Value must be a dictionary")
+
 class InventorySnapshot(BaseModel):
     """
     Snapshot of calculated stock levels of an item or items as of a specific date.
     """
-    model_config = ConfigDict(from_attributes=True)
-    items: Dict[str, int] = Field(
-        description=(
+    model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
+    items: Annotated[
+        NocaseDict,
+        BeforeValidator(validate_nocase_dict),
+        Field(description=(
             "Dictionary holding the stock levels of each item, where: "
             "The key is the name of the item (must be a string). "
             "The value is the calculated quantity or stock level for that item (must be an integer)."
-        ),
-        default_factory=dict)
+        ))
+    ]
+
 
 class InventoryItem(BaseModel):
     """
@@ -147,12 +162,13 @@ class InventoryItem(BaseModel):
     min_stock_level: int = Field(
         description="Minimum stock level: the minimum quantity that must be kept in stock for this item")
 
+
 class FinancialTransaction(BaseModel):
     """
     A financial transaction. Can be a stock order or a sale.
     """
     model_config = ConfigDict(from_attributes=True)
-    id: str = Field(description="Transaction ID (uuid7)")
+    id: str | None = Field(description="Transaction ID (uuid7)", default=None)
     item_name: str = Field(description="Name of the item involved in the transaction")
     transaction_type: str = Field(description="Type of transaction ('stock_orders' or 'sales')")
     units: int = Field(description="Number of units involved in the transaction")
@@ -177,12 +193,14 @@ class FinancialReport(BaseModel):
     """
     A complete financial report for the company as of a specific date.
     """
-    as_of_date: str = Field(description="Date up to which the report is generated in ISO format.", examples=['2026-01-31'])
+    as_of_date: str = Field(description="Date up to which the report is generated in ISO format.",
+                            examples=['2026-01-31'])
     cash_balance: float = Field(description="Current cash balance")
     inventory_value: float = Field(description="Total value of inventory")
     total_assets: float = Field(description="Combined cash and inventory value")
     inventory_summary: List[InventoryItem] = Field(description="Summary of the inventory")
     top_selling_products: List[TopSellingProduct] = Field(description="Top 5 products by revenue")
+
 
 ##################################
 # UTILITY FUNCTIONS FROM STARTER #
@@ -243,6 +261,7 @@ def generate_sample_inventory(paper_supplies: list, coverage: float = 0.4, seed:
 
     # Return inventory as a pandas DataFrame
     return pd.DataFrame(inventory)
+
 
 def init_database(db_engine: Engine, seed: int = 137) -> Engine:
     """
@@ -359,7 +378,9 @@ def init_database(db_engine: Engine, seed: int = 137) -> Engine:
         logger.error("Error initializing database.", exc_info=True)
         raise
 
-def create_transaction(item_name: str, transaction_type: str, quantity: int, price: float, transaction_date: str | datetime, ) -> FinancialTransaction:
+
+def create_transaction(item_name: str, transaction_type: str, quantity: int, price: float,
+                       transaction_date: str | datetime, ) -> FinancialTransaction:
     """
     This function records a financial transaction of type 'stock_orders' or 'sales' with a specified
     item name, quantity, total price, and transaction date into the 'transactions' table of the database.
@@ -412,6 +433,7 @@ def create_transaction(item_name: str, transaction_type: str, quantity: int, pri
         logger.error("Error creating transaction.", exc_info=True)
         raise
 
+
 def get_all_inventory(as_of_date: str) -> InventorySnapshot:
     """
     Retrieve a snapshot of available inventory as of a specific date.
@@ -444,7 +466,8 @@ def get_all_inventory(as_of_date: str) -> InventorySnapshot:
 
     # Convert the result into a dictionary {item_name: stock}
     items = dict(zip(result["item_name"], result["stock"]))
-    return InventorySnapshot(items=items)
+    return InventorySnapshot(items=NocaseDict(items))
+
 
 def get_stock_level(item_name: str, as_of_date: str | datetime) -> InventorySnapshot | None:
     """
@@ -469,12 +492,12 @@ def get_stock_level(item_name: str, as_of_date: str | datetime) -> InventorySnap
 
     # SQL query to compute net stock level for the item
     stock_query = """
-                  SELECT item_name,
+                  SELECT LOWER(item_name) AS item_name,
                          COALESCE(SUM(CASE
                                           WHEN transaction_type = 'stock_orders' THEN units
                                           WHEN transaction_type = 'sales' THEN -units
                                           ELSE 0
-                             END), 0) AS stock_level
+                             END), 0)     AS stock_level
                   FROM transactions
                   WHERE LOWER(item_name) = LOWER(:item_name)
                     AND transaction_date <= :as_of_date \
@@ -487,7 +510,7 @@ def get_stock_level(item_name: str, as_of_date: str | datetime) -> InventorySnap
             row = result.fetchone()
             inventory_snapshot = None
             if row is not None and row[0] is not None:
-                inventory_snapshot = InventorySnapshot(items={row[0]: row[1]})
+                inventory_snapshot = InventorySnapshot(items=NocaseDict({row[0]: row[1]}))
             logger.debug("FUNC (get_stock_level): Returning stock level for item.",
                          extra={"item_name": item_name,
                                 "as_of_date": as_of_date,
@@ -497,6 +520,7 @@ def get_stock_level(item_name: str, as_of_date: str | datetime) -> InventorySnap
     except Exception as e:
         logger.error("Error getting stock level", exc_info=True)
         raise
+
 
 def get_supplier_delivery_date(input_date_str: str, quantity: int) -> str:
     """
@@ -544,6 +568,7 @@ def get_supplier_delivery_date(input_date_str: str, quantity: int) -> str:
     # Return formatted delivery date
     return delivery_date_dt.strftime("%Y-%m-%d")
 
+
 def get_cash_balance(as_of_date: str | datetime) -> float:
     """
     Calculate the current cash balance as of a specified date.
@@ -580,6 +605,7 @@ def get_cash_balance(as_of_date: str | datetime) -> float:
     except Exception as e:
         logger.error("Error getting cash balance.", extra={"as_of_date": as_of_date}, exc_info=True)
         return 0.0
+
 
 def generate_financial_report(as_of_date: str | datetime) -> FinancialReport:
     """
@@ -659,6 +685,7 @@ def generate_financial_report(as_of_date: str | datetime) -> FinancialReport:
         "top_selling_products": top_selling_products,
     }
     return FinancialReport.model_validate(report)
+
 
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     """
@@ -745,6 +772,7 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
+
 ################
 # Shared tools #
 ################
@@ -757,6 +785,7 @@ def get_current_date() -> str:
          The current date in ISO format.
     """
     return date.today().isoformat()
+
 
 def get_all_item_names() -> list[str]:
     """
@@ -773,7 +802,8 @@ def get_all_item_names() -> list[str]:
     item_names = [item['item_name'] for item in PAPER_SUPPLIES]
     return sorted(set(item_names))
 
-def get_inventory_items_by_name(item_names: list[str]) -> list[InventoryItem] | None:
+
+def get_inventory_items_by_name(item_names: list[str]) -> List[InventoryItem]:
     """
     Get the static data (category, unit price, minimum stock levels) of the inventory items with the given name from the database.
     Returns None if none of the items exist.
@@ -797,7 +827,7 @@ def get_inventory_items_by_name(item_names: list[str]) -> list[InventoryItem] | 
             result = conn.execute(query, {"item_names": item_names})
             rows = result.mappings().all()
             if not rows:
-                return None
+                return []
 
             adapter = TypeAdapter(List[InventoryItem])
             inventory_items = adapter.validate_python(list(rows))
@@ -807,6 +837,7 @@ def get_inventory_items_by_name(item_names: list[str]) -> list[InventoryItem] | 
         logger.error("Error getting inventory items.", exc_info=True)
         raise
 
+
 ###########################
 # Tools for Inventory Agent
 ###########################
@@ -815,23 +846,34 @@ class ItemStockAnalysis(BaseModel):
     """Detailed breakdown of stock requirements for a single ordered item."""
     item_name: str = Field(description="Name of the catalog item.")
     requested_quantity: int = Field(description="Quantity requested by the customer.")
-    current_stock_at_date: int = Field(description="Projected stock level for the item exactly on the requested delivery date.")
+    current_stock_at_date: int = Field(
+        description="Projected stock level for the item exactly on the requested delivery date.")
     min_stock_level: int = Field(description="The minimum stock level required for this item.")
 
     # Fulfillment Analysis
-    can_fulfill_order: bool = Field(description="Whether this item can be fulfilled by the desired delivery date.")
-    shortage_for_order: int = Field(description="Units missing strictly to fulfill the order (0 if can_fulfill_order is True).")
-    stock_after_fulfillment: int = Field(description="Projected stock after fulfilling this order (can be negative if order is unfulfillable without restocking).")
-    drops_below_minimum: bool = Field(description="Whether the stock for this item will drop below its minimum stock level. This is True if stock_after_fulfillment falls below the min_stock_level of the item.")
-    supplier_delivery_date: str | None = Field(description="Date in ISO format (YYYY-MM-DD) by which the supplier can deliver missing units to fulfill the order. Can be missing if shortage is 0 or order can not be fulfilled in time", default=None, examples=["2026-01-31"])
+    can_fulfill_order_item: bool = Field(description="Whether this item can be fulfilled by the desired delivery date.")
+    shortage_for_order: int = Field(
+        description="Units missing strictly to fulfill the order (0 if can_fulfill_order is True).")
+    stock_after_fulfillment: int = Field(
+        description="Projected stock after fulfilling this order (can be negative if order is unfulfillable without restocking).")
+    drops_below_minimum: bool = Field(
+        description="Whether the stock for this item will drop below its minimum stock level. This is True if stock_after_fulfillment falls below the min_stock_level of the item.")
+    supplier_delivery_date: str | None = Field(
+        description="Date in ISO format (YYYY-MM-DD) by which the supplier can deliver missing units to fulfill the order. Can be missing if shortage is 0 or order can not be fulfilled in time",
+        default=None, examples=["2026-01-31"])
+
 
 class OrderStockAnalysisResult(BaseModel):
     """Complete analysis of an order's impact on inventory."""
     as_of_date: str = Field(description="The desired delivery date of the order. Used for the stock snapshot.")
-    can_fulfill_order: bool = Field(description="Whether the whole order can be fulfilled by the desired delivery date. This is True if stock at date >= requested quantity for all items in the order.")
-    items_analysis: List[ItemStockAnalysis] = Field(description="Analysis breakdown for each requested item of the order.")
+    can_fulfill_order: bool = Field(
+        description="Whether the whole order can be fulfilled by the desired delivery date. This is True if stock at date >= requested quantity for all items in the order.")
+    items_analysis: List[ItemStockAnalysis] = Field(
+        description="Analysis breakdown for each requested item of the order.")
 
-def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: str, request_date: str) -> OrderStockAnalysisResult:
+
+def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: str,
+                                     request_date: str) -> OrderStockAnalysisResult:
     """
     Analyzes a customer order against projected stock levels to determine if the order can be fulfilled,
     taking into account if the supplier can cover shortage in time if needed.
@@ -853,18 +895,20 @@ def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: st
         inventory_items_data = get_inventory_items_by_name(item_names)
 
         # Create a quick lookup dictionary for static item data
-        static_data_map = {item.item_name.lower(): item for item in (inventory_items_data or [])}
+        items_by_name = {item.item_name.lower(): item for item in (inventory_items_data or [])}
 
         analysis_list = []
 
         for item_name, requested_qty in order_items.items():
+            item_name = item_name.lower()
+
             # 1. Get current stock at the requested date
             stock_snapshot = get_stock_level(item_name, as_of_date)
             # Handle cases where item has no transactions yet (None) or doesn't exist in dict
             stock_at_date = stock_snapshot.items.get(item_name, 0) if stock_snapshot else 0
 
             # 2. Get the minimum stock level
-            static_item = static_data_map.get(item_name.lower())
+            static_item = items_by_name.get(item_name.lower())
             min_stock = static_item.min_stock_level if static_item else 0
 
             # 3. Calculate Fulfillment logic
@@ -880,8 +924,11 @@ def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: st
                     date_request = date.fromisoformat(request_date)
                     can_fulfill = date_supplier_delivery <= date_request
                 except Exception as e:
-                    logger.error(f"Error comparing request date ({request_date}) vs supplier delivery date ({supplier_delivery_date}).", exc_info=True)
-                    raise ValueError(f"An error occurred while comparing request date and supplier delivery date. {str(e)}")
+                    logger.error(
+                        f"Error comparing request date ({request_date}) vs supplier delivery date ({supplier_delivery_date}).",
+                        exc_info=True)
+                    raise ValueError(
+                        f"An error occurred while comparing request date and supplier delivery date. {str(e)}")
 
             # 4. Calculate Replenishment logic
             stock_after = stock_at_date - requested_qty
@@ -893,7 +940,7 @@ def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: st
                     requested_quantity=requested_qty,
                     current_stock_at_date=stock_at_date,
                     min_stock_level=min_stock,
-                    can_fulfill_order=can_fulfill,
+                    can_fulfill_order_item=can_fulfill,
                     shortage_for_order=shortage,
                     stock_after_fulfillment=stock_after,
                     drops_below_minimum=drops_below_min,
@@ -903,7 +950,7 @@ def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: st
 
         return OrderStockAnalysisResult(
             as_of_date=as_of_date,
-            can_fulfill_order=all(analysis.can_fulfill_order for analysis in analysis_list),
+            can_fulfill_order=all(analysis.can_fulfill_order_item for analysis in analysis_list),
             items_analysis=analysis_list
         )
 
@@ -911,44 +958,61 @@ def analyze_order_stock_requirements(order_items: Dict[str, int], as_of_date: st
         logger.error("Error analyzing order stock requirements.", exc_info=True)
         raise ValueError(f"An error occurred while analyzing stock requirements: {str(e)}")
 
+
 class ItemShortageDetails(BaseModel):
     """Represents the shortage of units of an inventory item that must be covered to fulfill a customer order."""
     item_name: str = Field(description="Name of the catalog item.")
     unit_price: float = Field(description="Unit price of the item before discounts.")
-    shortage_for_order: int = Field(description="Units missing strictly to fulfill the order (0 if can_fulfill_order is True).")
-    supplier_delivery_date: str = Field(description="Date in ISO format (YYYY-MM-DD) by which the supplier can deliver missing units to fulfill the order.", examples=["2026-01-31"])
+    shortage_for_order: int = Field(
+        description="Units missing strictly to fulfill the order (0 if can_fulfill_order is True).")
+    supplier_delivery_date: str = Field(
+        description="Date in ISO format (YYYY-MM-DD) by which the supplier can deliver missing units to fulfill the order.",
+        examples=["2026-01-31"])
+
 
 class OrderFromSupplierResult(BaseModel):
     """Result of ordering the necessary shortage units to cover a customer order."""
-    messages: List[str] = Field(description="List of all answer messages in response to the given request.", default_factory=list)
+    messages: List[str] = Field(description="List of all answer messages in response to the given request.",
+                                default_factory=list)
     transactions: List[FinancialTransaction] = Field(
         description="List of the 'stock_orders' transactions that were created to cover the shortage to fulfill the order",
         default_factory=list
     )
 
-def order_shortage_from_supplier(items_to_order: list[ItemShortageDetails], total_base_amount: float) -> OrderFromSupplierResult:
+
+def order_shortage_from_supplier(items_to_order: list[ItemShortageDetails], total_base_amount: float,
+                                 delivery_date: str) -> OrderFromSupplierResult:
     """
     Orders all the given shortage units from the supplier
 
     Args:
         items_to_order: List of ItemShortageDetails objects
         total_base_amount: Total amount of the order BEFORE discounts
+        delivery_date: The requested delivery date of the Order, in ISO format (YYYY-MM-DD), e.g., 2026-01-31.
 
     Returns:
-        An OrderShortageResult, which contains all the financial transactions of 'stock_orders' type that were created
+        An OrderFromSupplierResult, which contains all the financial transactions of 'stock_orders' type that were created
     """
     logger.debug("FUNC (order_shortage_from_supplier): Ordering shortage from supplier.",
-                 extra={"items_to_order": items_to_order})
+                 extra={"items_to_order": items_to_order, "total_base_amount": total_base_amount,
+                        "delivery_date": delivery_date})
     try:
-        # Get latest delivery date
-        dates = [date.fromisoformat(item.supplier_delivery_date) for item in items_to_order if item.supplier_delivery_date]
-        latest_delivery_date = max(dates)
+        # Get latest delivery date and sure all are on or before the order delivery date
+        dates = [date.fromisoformat(item.supplier_delivery_date) for item in items_to_order if
+                 item.supplier_delivery_date]
+        latest_delivery_date = max(dates) if dates else None
+
+        if latest_delivery_date > date.fromisoformat(delivery_date):
+            return OrderFromSupplierResult(
+                messages=[
+                    "Unable to fulfill order. Projected delivery dates to replenish stock shortages don't meet the order fulfillment date."]
+            )
 
         # Compute resulting cash balance
         # NOTE: This might not be accurate but "acceptable" for the project.
         cash_balance = get_cash_balance(latest_delivery_date.isoformat())
         if cash_balance - total_base_amount < 0:
-            return OrderFromSupplierResult(messages=["Unable to fulfill order, projected cash balance is not enough"])
+            return OrderFromSupplierResult(messages=["Unable to fulfill order. Projected cash balance is not enough"])
 
         # Place 'stock_order' transactions.
         # NOTE: This should be a DB transaction and rollback
@@ -956,7 +1020,9 @@ def order_shortage_from_supplier(items_to_order: list[ItemShortageDetails], tota
         for item in items_to_order:
             if item.shortage_for_order > 0:
                 price = item.shortage_for_order * item.unit_price
-                transaction = create_transaction(item.item_name, 'stock_orders', item.shortage_for_order, price, item.supplier_delivery_date)
+                # create transaction, use order delivery date for simplicity
+                transaction = create_transaction(item.item_name, 'stock_orders', item.shortage_for_order, price,
+                                                 delivery_date)
                 transactions.append(transaction)
 
         return OrderFromSupplierResult(transactions=transactions)
@@ -967,13 +1033,18 @@ def order_shortage_from_supplier(items_to_order: list[ItemShortageDetails], tota
             messages=["I'm sorry, we encountered an error while ordering shortage units to cover your order"]
         )
 
+
 class ReplenishToMinItemDetails(BaseModel):
-    """Necessary data to replenish the stock level of the given item up to its minimum stock level."""
+    """Necessary data to replenish the stock level of the given inventory item up to its minimum stock level."""
     item_name: str = Field(description="Name of the catalog item.")
     unit_price: float = Field(description="Unit price of the item before discounts.")
     min_stock_level: int = Field(description="The minimum stock level required for this item.")
+    can_fulfill_order_item: bool = Field(description="Whether this item can be fulfilled by the desired delivery date.")
+    stock_after_fulfillment: int = Field(
+        description="Projected stock after fulfilling the customer order (can be negative if order is unfulfillable without restocking).")
 
-def replenish_to_minimum(items_to_order: List[ReplenishToMinItemDetails], as_of_date: str):
+
+def replenish_to_minimum(items_to_order: List[ReplenishToMinItemDetails], as_of_date: str) -> OrderFromSupplierResult:
     """
     Replenishes each item in the list to bring its stock level up to its minimum at the given cutoff date.
 
@@ -982,24 +1053,27 @@ def replenish_to_minimum(items_to_order: List[ReplenishToMinItemDetails], as_of_
         as_of_date (str): The requested delivery date of the Order, in ISO format (YYYY-MM-DD), e.g., 2026-01-31.
 
     Returns:
-        An OrderShortageResult, which contains all the financial transactions of 'stock_orders' type that were created
+        An OrderFromSupplierResult, which contains all the financial transactions of 'stock_orders' type that were created
     """
     logger.debug("FUNC (replenish_to_minimum): Bringing up stock to minimum levels.",
                  extra={"items_to_order": items_to_order, "as_of_date": as_of_date})
     try:
         transactions = []
         for item in items_to_order:
-            stock_snapshot = get_stock_level(item.item_name, as_of_date)
-            stock_at_date = stock_snapshot.items.get(item.item_name, 0) if stock_snapshot else 0
-            shortage = max(0, item.min_stock_level - stock_at_date)
-            if shortage > 0:
-                price = shortage * item.unit_price
-                transaction = create_transaction(item.item_name, 'stock_orders', shortage, price, as_of_date)
-                transactions.append(transaction)
+            if item.can_fulfill_order_item:
+                shortage = max(0, item.min_stock_level - item.stock_after_fulfillment)
+                if shortage > 0:
+                    price = shortage * item.unit_price
+                    # NOTE: Using Order delivery date instead of supplier's one for simplicity
+                    transaction = create_transaction(item.item_name, 'stock_orders', shortage, price, as_of_date)
+                    transactions.append(transaction)
+
+        return OrderFromSupplierResult(transactions=transactions)
 
     except Exception as e:
         logger.error("Error bringing up stock to minimum levels.", exc_info=True)
-        return OrderFromSupplierResult()
+        return OrderFromSupplierResult(messages=["I'm sorry, we encountered an error while bringing up stock to minimum levels"])
+
 
 #########################
 # Tools for Quoting Agent
@@ -1031,6 +1105,7 @@ gpt_4o_mini = OpenAIChatModel(
     provider=OpenAIProvider(openai_client=client)
 )
 
+
 #############################
 ### Order Processor Agent ###
 #############################
@@ -1053,19 +1128,22 @@ class RequestMetadata(BaseModel):
                        examples=["unknown", "meeting", "festival", "concert", "ceremony", "party", "conference",
                                  "gathering"], alias="event_type")
 
+
 class CustomerRequestDetails(BaseModel):
     """
     Represents the details of a customer request
     """
     delivery_date: str = Field(description="Expected delivery date for the order, in ISO format (YYY-MM-DD).",
                                examples=["2026-01-31"])
-    request_date: str = Field(description="Date of request. This is the date on which the order is made, in ISO format (YYY-MM-DD).",
-                              examples=["2026-01-31"])
+    request_date: str = Field(
+        description="Date of request. This is the date on which the order is made, in ISO format (YYY-MM-DD).",
+        examples=["2026-01-31"])
     items: Dict[str, int] = Field(description="Ordered items and quantities.", default_factory=dict)
     request_metadata: RequestMetadata = Field(description="Metadata about the customer request.", default=None)
     request_status: str = Field(description="Must be either 'ACCEPTED' or 'DECLINED'", default="DECLINED")
     messages: List[str] = Field(description="List of all answer messages in response to the given request.",
                                 default_factory=list)
+
 
 ORDER_PROCESSOR_SYSTEM_PROMPT = (
     "You are the Order Processor for the Beaver's Choice Paper Company\n."
@@ -1073,12 +1151,22 @@ ORDER_PROCESSOR_SYSTEM_PROMPT = (
     "- Specific names of the items and their respective quantities\n"
     "- Expected or desired delivery date by the customer\n"
     "- Date of request\n"
-    "- Inferred additional context like: mood of the customer, his/her occupation or job, event type\n"
+    "- Inferred additional context like: mood and occupation of the customer, qualitative order size, event type\n"
     "\n"
     "### GUIDELINES\n"
     "Use the following guidelines to be able to understand and process a customer request:\n"
-    "- The `get_all_item_names` tool contains all the catalog item names in the Company's inventory, use it to get examples of item names.\n"
-    "- An item is a catalog product name only. Numbers and units of measure such as sheets, reams, packs, boxes, rolls, etc., are part of the quantity, not separate items.\n"
+    "- The `get_all_item_names` tool returns all the catalog item names in the Company's inventory. Use them as examples and help you identify the items from the customer request.\n"
+    "- When identifying items, extract only the canonical product name. Strip away all customer preferences, descriptive adjectives, or material specs (e.g., color, texture, biodegradable status, dimensions) unless they are essential to distinguishing the product in the inventory.\n"
+    "- Numbers and units of measure such as sheets, reams, packs, boxes, rolls, etc., are part of the quantity, not separate items nor parts of the name.\n"
+    "- If unsure whether an attribute is part of the product name or a customer preference, default to the most generic version of the product name.\n"
+    "\n"
+    "### EXAMPLES\n"
+    "- Input: \"100 sheets of heavy cardstock (white)\" -> Item: \"heavy cardstock\", Quantity: 100\n"
+    "- Input: \"20 sheets of colored paper (assorted colors)\" -> Item: \"colored paper\", Quantity: 20\n"
+    "- Input: \"300 poster boards (24 x 36)\" -> Item: \"poster boards\", Quantity: 300\n"
+    "- Input: \"500 paper plates (biodegradable)\" -> Item: \"paper plates\", Quantity: 500\n"
+    "\n"
+    "### STRICT RULES\n"
     "- You MUST NOT reject an order if one or more requested items are not present in the company's inventory, as long as they are relevant to a paper supplies company.\n"
     "- If the delivery date is not provided, use the current date.\n"
     "- You MUST DECLINE an order request if:\n"
@@ -1106,6 +1194,7 @@ def new_order_processor_agent() -> Agent:
     )
     return order_processor_agent
 
+
 #####################
 ### Quoting Agent ###
 #####################
@@ -1123,6 +1212,7 @@ class QuoteCalculation(BaseModel):
                                    default=0.0)
     total_amount: float = Field(description="Final quoted amount after discounts")
 
+
 class ItemQuote(BaseModel):
     """
     Represents the response generated by the Quoting Agent for a quote request of a single order item.
@@ -1134,14 +1224,18 @@ class ItemQuote(BaseModel):
     messages: List[str] = Field(description="List of all answer messages in response to the given request.",
                                 default_factory=list)
 
+
 class OrderQuote(BaseModel):
     """
     Detailed generated quote for a customer order
     """
-    item_quotes: List[ItemQuote] = Field(description="List of detailed quotes for each item in the order.", default_factory=list)
+    item_quotes: List[ItemQuote] = Field(description="List of detailed quotes for each item in the order.",
+                                         default_factory=list)
     total_base_amount: float = Field(description="Total amount of the order BEFORE discounts.", default=0.0)
     total_amount: float = Field(description="Total quoted amount of the order, AFTER discounts.", default=0.0)
-    messages: List[str] = Field(description="List of answer messages in response to the given request.", default_factory=list)
+    messages: List[str] = Field(description="List of answer messages in response to the given request.",
+                                default_factory=list)
+
 
 class SimpleQuoteData(BaseModel):
     """Essential quote details for a single item of an order, needed for inventory and sales processing."""
@@ -1149,6 +1243,7 @@ class SimpleQuoteData(BaseModel):
     quantity: int = Field(description="Quantity ordered")
     unit_price: float = Field(description="Unit price of the item")
     total_amount: float = Field(description="Total quoted price including discounts")
+
 
 QUOTING_AGENT_SYSTEM_PROMPT = (
     "You are the Quoting Expert Agent for the Beaver's Choice Paper Company.\n"
@@ -1164,7 +1259,7 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
     "   - The item quantity must be a positive integer number.\n"
     "2.1. If any of these requirements are not met, answer immediately indicating the relevant errors in the `messages` field of the response.\n"
     "3. Use the `search_quote_history` tool with only the item name as the search term to retrieve historical quotes for the item.\n"
-    "4. Analyze the returned historical quotes to understand: unit price of the item, applied discounts, and explanations for similar requests. This information should inform your current quote generation to ensure competitiveness and consistency.\n"
+    "4. Analyze the returned historical quotes to understand: unit price of the item, applied discounts, and explanations for similar requests. This data should inform your current quote generation to ensure competitiveness and consistency.\n"
     "5. Calculate the base cost (quantity × unit_price). Use the unit price given in the request if present, otherwise use the best match from your historical quote analysis."
     "5.1. If you are unable to do so, answer immediately indicating the relevant errors in the `messages` field of the response.\n"
     "6. Apply any discount you judge appropriate based on your analysis from the quote history, unless explicitly indicated not to do so.\n"
@@ -1177,6 +1272,7 @@ QUOTING_AGENT_SYSTEM_PROMPT = (
     "- You MUST provide your final quote in the structured format with all required fields.\n"
 )
 
+
 def new_quoting_agent() -> Agent:
     quoting_agent = Agent(
         gpt_4o_mini,
@@ -1186,8 +1282,10 @@ def new_quoting_agent() -> Agent:
         output_type=ItemQuote,
         output_retries=3,
         tools=[
-            Tool(get_all_item_names, docstring_format="google", require_parameter_descriptions=True),  # to assist in inferring item names
-            Tool(search_quote_history, docstring_format="google", require_parameter_descriptions=True), # get past quotes
+            Tool(get_all_item_names, docstring_format="google", require_parameter_descriptions=True),
+            # to assist in inferring item names
+            Tool(search_quote_history, docstring_format="google", require_parameter_descriptions=True),
+            # get past quotes
             # Tool(get_inventory_items_by_name, docstring_format="google", require_parameter_descriptions=True) # to get unit_price
         ]
     )
@@ -1208,6 +1306,14 @@ def new_quoting_agent() -> Agent:
         if quote_calc.discount_amount <= 0 and quote_calc.discount_rate <= 0:
             return output
 
+        expected_base_amount = round(quote_calc.quantity * quote_calc.unit_price, 2)
+        if abs(quote_calc.base_amount - expected_base_amount) > 0.01:
+            raise ModelRetry(
+                f"You calculated base_amount={quote_calc.base_amount}, "
+                f"but the result of the operation quantity * unit_price is {expected_base_amount}. "
+                f"Fix the base_amount to equal quantity * unit_price."
+            )
+
         expected_discount = round(quote_calc.base_amount * quote_calc.discount_rate, 2)
         if abs(quote_calc.discount_amount - expected_discount) > 0.01:
             raise ModelRetry(
@@ -1227,6 +1333,7 @@ def new_quoting_agent() -> Agent:
 
     return quoting_agent
 
+
 #######################
 ### Inventory Agent ###
 #######################
@@ -1240,6 +1347,7 @@ class InventoryAgentOutput(BaseModel):
         default_factory=list)
     messages: List[str] = Field(description="List of all answer messages in response to the given request.",
                                 default_factory=list)
+
 
 INVENTORY_AGENT_SYSTEM_PROMPT = (
     "You are the Inventory Management Agent for the Beaver's Choice Paper Company.\n"
@@ -1258,12 +1366,15 @@ INVENTORY_AGENT_SYSTEM_PROMPT = (
     "2. Call the `analyze_order_stock_requirements` tool to analyze if the order can be fulfilled in time.\n"
     "2.1. If the analysis yields that the order can not be fulfilled, answer immediately indicating which items can not be fulfilled in time.\n"
     "3. Call the `order_shortage_from_supplier` tool to order from the supplier the necessary shortage units to fulfill the order.\n"
-    "3.1. Read all the messages from the tool call response. If any errors occurred, answer immediately indicating the relevant errors in the `messages` field of your response.\n"
+    "3.1. Read all the messages from the `order_shortage_from_supplier` tool call response. If any errors occurred, answer immediately indicating the relevant errors in the `messages` field of your response.\n"
     "4. Call the `replenish_to_minimum` tool to bring any necessary item stock levels up to its minimum.\n"
+    "4.1. Read all the messages from the `replenish_to_minimum` tool call response. If any errors occurred you can safely ignore them.\n"
     "\n"
     "### Output\n"
     "- Always provide your final answer in a structured format\n"
+    "- The `placed_transactions` field of your response MUST CONTAIN all the transactions returned from the calls to the tools.\n"
 )
+
 
 def new_inventory_agent() -> Agent:
     """
@@ -1283,6 +1394,7 @@ def new_inventory_agent() -> Agent:
     )
     return inventory_agent
 
+
 ###################
 ### Sales Agent ###
 ###################
@@ -1299,6 +1411,7 @@ class SalesAgentOutput(BaseModel):
     messages: List[str] = Field(
         description="List of all answer messages in response to the given request.", default_factory=list
     )
+
 
 SALES_AGENT_SYSTEM_PROMPT = (
     "You are the Sales and Ordering Agent for the Beaver's Choice Paper Company.\n"
@@ -1318,6 +1431,7 @@ SALES_AGENT_SYSTEM_PROMPT = (
     "- You MUST provide your final response in the structured format with all required fields.\n"
 )
 
+
 def new_sales_agent():
     sales_agent = Agent(
         gpt_4o_mini,
@@ -1333,6 +1447,7 @@ def new_sales_agent():
 
     return sales_agent
 
+
 ##########################
 ### Orchestrator Agent ###
 ##########################
@@ -1343,6 +1458,7 @@ class OrchestratorDependencies:
     inventory_agent: Agent
     quoting_agent: Agent
     sales_agent: Agent
+
 
 class OrchestratorAgentOutput(BaseModel):
     """
@@ -1355,8 +1471,10 @@ class OrchestratorAgentOutput(BaseModel):
         "It should also have confirmation about the quantities, quoted prices and applied discounts."))
     total_amount: float = Field(
         description="Grand total price of the order quoted to the customer, including discounts. Computed by the sum of all the individual quotes for each item in the order.")
-    delivery_date: str | None = Field(description="Delivery date for the order, in ISO format.", examples=['2026-01-31'], default=None)
+    delivery_date: str | None = Field(description="Delivery date for the order, in ISO format.",
+                                      examples=['2026-01-31'], default=None)
     request_metadata: RequestMetadata | None = Field(description="Metadata about the customer request.", default=None)
+
 
 ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
     "You are the orchestrator for the Beaver's Choice Paper Company\n."
@@ -1377,6 +1495,7 @@ ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
     "- You MUST provide your final response in the structured format with all required fields.\n"
 )
 
+
 def _build_orchestrator_agent() -> Agent:
     orchestrator_agent = Agent(
         gpt_4o_mini,
@@ -1384,11 +1503,7 @@ def _build_orchestrator_agent() -> Agent:
         system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
         capabilities=[Thinking()],
         deps_type=OrchestratorDependencies,
-        output_type=OrchestratorAgentOutput,
-        tools=[
-            get_current_date,
-            get_all_item_names,
-        ]
+        output_type=OrchestratorAgentOutput
     )
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
@@ -1405,7 +1520,7 @@ def _build_orchestrator_agent() -> Agent:
         """
         try:
             logger.info(
-                "Processing customer order.",
+                "Processing customer order information.",
                 extra={"customer_message": customer_message}
             )
             user_prompt = (
@@ -1483,7 +1598,8 @@ def _build_orchestrator_agent() -> Agent:
         except Exception as e:
             logger.error("Error producing order quote.", exc_info=True, extra={"items": items})
             return OrderQuote(
-                messages=["I'm sorry, we encountered an error generating a quote. Please try again later or contact customer service."]
+                messages=[
+                    "I'm sorry, we encountered an error generating a quote. Please try again later or contact customer service."]
             )
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
@@ -1615,29 +1731,16 @@ class OrchestratorAgent:
 
         self.orchestrator_agent = _build_orchestrator_agent()
 
-    def process_customer_order(self, customer_message) -> OrchestratorAgentOutput:
+    def process_customer_order(self, customer_message) -> AgentRunResult[OrchestratorAgentOutput]:
         """
         Process a customer order through the coordinated agent workflow
         :param customer_message: The customer's order request
         :return: A human-readable response to the customer
         """
-
-        try:
-            logger.info("Processing customer order", extra={"customer_message": customer_message})
-            response = self.orchestrator_agent.run_sync(user_prompt=customer_message,
-                                                        deps=self.orchestrator_dependencies)
-            output: OrchestratorAgentOutput = response.output
-            return output
-
-        except Exception as e:
-            logger.error(f"Error processing customer order.", exc_info=True,
-                         extra={"customer_message": customer_message})
-            return OrchestratorAgentOutput(
-                order_status="DECLINED",
-                customer_response="I'm sorry, we encountered an error processing your order. Please try again later or contact customer service.",
-                total_amount=-1,
-                request_metadata=None
-            )
+        logger.info("Processing customer order through orchestrator agent.", extra={"customer_message": customer_message})
+        response = self.orchestrator_agent.run_sync(user_prompt=customer_message,
+                                                    deps=self.orchestrator_dependencies)
+        return response
 
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
@@ -1667,6 +1770,20 @@ def run_test_scenarios():
     ############
     # INITIALIZE YOUR MULTI AGENT SYSTEM HERE
     orchestrator = OrchestratorAgent()
+
+    judge = LLMJudge(
+        model=gpt_4o_mini,
+        include_input=True,
+        assertion=False,
+        score={'include_reason': True},
+        model_settings=ModelSettings(temperature=0.0),
+        rubric=(
+            "Verify that the agent's prose response to the customer is accurate and complete.\n"
+            "If the order is ACCEPTED: The prose MUST explicitly mention the total price and delivery date.\n"
+            "If the order is DECLINED: The prose MUST provide a professional explanation for the rejection.\n"
+            "The prose must not contradict the structured JSON data (price/dates)."
+        )
+    )
     ############
     ############
     ############
@@ -1693,16 +1810,32 @@ def run_test_scenarios():
         ############
         ############
 
-        response = orchestrator.process_customer_order(request_with_date)
+        result = orchestrator.process_customer_order(request_with_date)
+        orchestrator_agent_output: OrchestratorAgentOutput = result.output
+        judge_ctx = EvaluatorContext(
+            name=None,
+            inputs=request_with_date,
+            output=orchestrator_agent_output,
+            expected_output=None,
+            metadata=result.metadata,
+            duration=getattr(result, "duration", 0.0),
+            _span_tree=SpanTree(),
+            attributes={},
+            metrics={},
+        )
+        judge_report = judge.evaluate_sync(judge_ctx)
+        evaluation_reason: EvaluationReason = judge_report.get("LLMJudge") # TODO: is there a better way to get this?
 
         # Update state
         report = generate_financial_report(request_date)
         current_cash = report.cash_balance
         current_inventory = report.inventory_value
 
-        print(f"Response: {response.model_dump_json(indent=2)}")
+        print(f"Response: {orchestrator_agent_output.model_dump_json(indent=2)}")
+        print(f"Judge Report: {json.dumps(asdict(evaluation_reason), indent=2)}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
+        print(f"==========================\n\n")
 
         results.append(
             {
@@ -1710,7 +1843,9 @@ def run_test_scenarios():
                 "request_date": request_date,
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": response,
+                "response": orchestrator_agent_output,
+                "judge_score": evaluation_reason.value,
+                "judge_reason": evaluation_reason.reason
             }
         )
 

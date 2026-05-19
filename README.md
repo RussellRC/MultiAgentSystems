@@ -33,13 +33,11 @@ OPENAI_API_KEY=voc-***.***
 ```
 
 ## Project Structure
-`./project`: Contains the implementation and additional files to run the main application
-  * `/project/project.py`: Agent implementation file
-  * `/project/DIAGRAM.md`: Updated agent flow diagram 
+`./project` directory: Contains the implementation and additional files to run the main application
 
-`./starter`: **Untouched** starter template along with Project Overview and Instructions
+`./starter` directory: Contains the **untouched** starter template along with the Project Overview and Instructions for reference
 
-`./tests`: Unit tests directory
+`./tests` directory: Contains unit test files for all the agents and tools
 
 ## Running the agent application
 
@@ -50,8 +48,16 @@ To run it using poetry, execute the following command from the root project dire
 poetry run python project/project.py
 ```
 
-## Project reflections
-[REFLECTIONS.md](./REFLECTIONS.md)
+## Running tests
+To run an individual test file using poetry, execute the following command from the root project directory:
+```shell
+poetry run python -m unittest tests/{test_file}
+```
+
+## Project deliverables
+* [DESIGN.md](./project/DESING.md): Updated agent flow diagram and brief explanation of how the agent works
+* [project.py](./project/project.py): Agent implementation file
+* [REFLECTIONS.md](./REFLECTIONS.md): Project reflections covering design decisions, areas of improvement and lessons learned 
 
 ## Built With
 * Poetry: Dependency Management

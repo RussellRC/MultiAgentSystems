@@ -17,7 +17,8 @@ from project.project import OrchestratorAgent, OrchestratorAgentOutput, init_dat
 def _task(inputs: dict) -> OrchestratorAgentOutput:
     """Task function: run the orchestrator agent with the given query."""
     orchestrator_agent = OrchestratorAgent()
-    output = orchestrator_agent.process_customer_order(inputs["customer_request"])
+    result = orchestrator_agent.process_customer_order(inputs["customer_request"])
+    output = result.output
     print(output.model_dump_json(indent=2))
     return output
 
@@ -84,8 +85,7 @@ class TestOrchestratorAgent(unittest.TestCase):
                     name="simple_request_no_order_date",
                     inputs={
                         "customer_request": "I would like to order 5000 reams of A4 paper. (Date of request: 2025-01-01)",
-                    },
-                    expected_output=None,
+                    }
                 ),
             ],
             evaluators=(
@@ -116,7 +116,6 @@ class TestOrchestratorAgent(unittest.TestCase):
                                             "Please ensure the delivery is made by April 15, 2025. Thank you. "
                                             "(Request date: 2025-01-01)",
                     },
-                    expected_output=None,
                     evaluators=(
                         HasDeliveryDate(),
                         HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),
@@ -146,7 +145,6 @@ class TestOrchestratorAgent(unittest.TestCase):
                                             "The supplies must be delivered by April 15, 2025, for our upcoming conference. "
                                             "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)",
                     },
-                    expected_output=None,
                     evaluators=(
                         HasDeliveryDate(),
                         HasReasonableTotal(min_amount=total_base*.9, max_amount=total_base),

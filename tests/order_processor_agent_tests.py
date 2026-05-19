@@ -1,7 +1,6 @@
 import os
 import unittest
 from dataclasses import dataclass
-from datetime import date
 from typing import List, Dict
 
 from tests.test_utils import eval_report_cases
@@ -105,9 +104,16 @@ class TestInventoryAgent(unittest.TestCase):
             name="simple_request",
             cases=[
                 Case(
-                    name="simple request",
-                    inputs="I would like to order 500 reams of A4 paper.",
-                    expected_output=None,
+                    name="simple request 1",
+                    inputs="I would like to place an order 500 reams of A4 paper. Please deliver it by April 15, 2025. (Date of request: 2025-04-01)",
+                ),
+                Case(
+                    name="simple request 2",
+                    inputs="I would like to request 500 reams of A4 paper. I need these supplies delivered by April 15, 2025. (Date of request: 2025-04-01)",
+                ),
+                Case(
+                    name="simple request 3",
+                    inputs="I would need 500 reams of A4 paper. The supplies must be delivered by April 15, 2025. (Date of request: 2025-04-01)",
                 ),
             ],
             evaluators=[
@@ -116,12 +122,12 @@ class TestInventoryAgent(unittest.TestCase):
                     items={
                         "A4 paper": 500
                     },
-                    delivery_date=date.today().isoformat(),
-                    request_date=date.today().isoformat()
+                    delivery_date="2025-04-15",
+                    request_date="2025-04-01"
                 )
             ],
         )
-        report = dataset.evaluate_sync(_task)
+        report = dataset.evaluate_sync(_task, max_concurrency=1)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
@@ -134,8 +140,7 @@ class TestInventoryAgent(unittest.TestCase):
                     name="letter-sized paper is unknown",
                     inputs="I would like to request a large order of high-quality paper supplies for an upcoming event. "
                            "We need 500 reams of A4 paper, 300 reams of letter-sized paper, and 200 reams of cardstock. "
-                           "Please ensure the delivery is made by April 15, 2025. Thank you.",
-                    expected_output=None,
+                           "Please ensure the delivery is made by April 15, 2025. Thank you. (Date of request: 2025-04-01)"
                 ),
             ],
             evaluators=[
@@ -147,16 +152,17 @@ class TestInventoryAgent(unittest.TestCase):
                         "Cardstock": 200
                     },
                     delivery_date="2025-04-15",
-                    request_date=date.today().isoformat()
+                    request_date="2025-04-01"
                 )
             ],
         )
-        report = dataset.evaluate_sync(_task)
+        report = dataset.evaluate_sync(_task, max_concurrency=1)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
 
     def test_quote_request_3(self):
+        """3rd request from quote_requests_sample.csv"""
         dataset = Dataset(
             name="test_quote_request_3",
             cases=[
@@ -164,8 +170,7 @@ class TestInventoryAgent(unittest.TestCase):
                     name="test_quote_request_3",
                     inputs="I need to order 10,000 sheets of A4 paper, 5,000 sheets of A3 paper, and 500 reams of printer paper. "
                            "The supplies must be delivered by April 15, 2025, for our upcoming conference. "
-                           "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)",
-                    expected_output=None,
+                           "Please confirm the order and delivery schedule. (Date of request: 2025-04-04)"
                 ),
             ],
             evaluators=[

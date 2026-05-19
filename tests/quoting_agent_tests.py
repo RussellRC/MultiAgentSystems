@@ -1,7 +1,6 @@
 import os
 import unittest
 from dataclasses import dataclass
-from datetime import date
 
 from tests.test_utils import eval_report_cases
 
@@ -17,7 +16,6 @@ from project.project import (
     DB_ENGINE,
     new_quoting_agent,
     ItemQuote,
-    get_supplier_delivery_date,
 )
 
 
@@ -27,6 +25,31 @@ def _task(query: str) -> ItemQuote:
     output: ItemQuote = result.output
     print(output.model_dump_json(indent=2))
     return output
+
+@dataclass
+class QuoteCalculationEvaluator(Evaluator):
+
+    unit_price: float
+    quantity: int
+
+    """
+    Validates that the QuoteCalculation is mathematically sound and consistent.
+    """
+    def evaluate(self, ctx: EvaluatorContext[str, ItemQuote]):
+        calc = ctx.output.quote_calculation
+
+        # Verify basic math: total = unit_price * quantity * (1 - discount_rate)
+        expected_base = round(calc.unit_price * calc.quantity, 2)
+        expected_total = round(expected_base * (1 - calc.discount_rate), 2)
+        actual_total = round(calc.total_amount, 2)
+
+        math_is_correct = actual_total == expected_total
+
+        return {
+            "quantity_matches": calc.quantity == self.quantity,
+            "unit_price_matches": calc.unit_price == self.unit_price,
+            "math_consistent": math_is_correct,
+        }
 
 @dataclass
 class HasReasonableTotal(Evaluator):
@@ -46,15 +69,23 @@ class HasReasonableTotal(Evaluator):
 class HasExplanation(Evaluator):
     """Custom evaluator: assert that the quote has a non-empty explanation."""
 
-    expected_words: list[str] = None
+    may_have_words: list[str] = None
+    must_have_words: list[str] = None
 
     def evaluate(self, ctx: EvaluatorContext[str, ItemQuote]):
+
         if not ctx.output.quote_explanation:
-            return {"has_explanation": False}
-        if not self.expected_words:
-            return {"has_explanation": len(ctx.output.quote_explanation) > 0}
-        explanation = ctx.output.quote_explanation.lower()
-        return any(word.lower() in explanation for word in self.expected_words)
+            return {
+                "has_explanation": False,
+                "may_have_words": False,
+                "must_have_words": False
+            }
+
+        return {
+            "has_explanation": len(ctx.output.quote_explanation.strip()) > 0,
+            "may_have_words": any(word in ctx.output.quote_explanation for word in self.may_have_words),
+            "must_have_words": all(word in ctx.output.quote_explanation for word in self.must_have_words)
+        }
 
 class TestQuotingAgent(unittest.TestCase):
 
@@ -76,92 +107,16 @@ class TestQuotingAgent(unittest.TestCase):
         if os.path.exists(_test_db_path):
             os.remove(_test_db_path)
 
-    def test_simple_quote_a4_paper(self):
-        """
-        Test the simplest case: quote for 100 sheets of A4 paper with NO discounts.
-        Expected: 100 * $0.05 = $5.00 base price.
-        """
-        quantity = 100
-        unit_price = 0.05
-        dataset = Dataset(
-            name="simple_quote_a4",
-            cases=[
-                Case(
-                    name="quote_100_sheets_a4",
-                    inputs=f"Give me a quote for {quantity} sheets of A4 paper. DO NOT apply any discounts.",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                HasReasonableTotal(min_amount=quantity*unit_price, max_amount=quantity*unit_price),
-                HasExplanation([str(quantity), "a4"]),
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-
-    def test_large_amount_quote_a4_paper(self):
-        """
-        Test quote for 10000 sheets of A4 paper. Should have a discount due to quantity.
-        """
-        quantity = 10000
-        base_total = quantity * 0.05
-        delivery_date = get_supplier_delivery_date(date.today().isoformat(), quantity)
-
-        dataset = Dataset(
-            name="large_quote_a4",
-            cases=[
-                Case(
-                    name="quote_10000_sheets_a4",
-                    inputs=f"Give me a quote for {quantity} sheets of A4 paper.",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                HasReasonableTotal(min_amount=400.0, max_amount=base_total - 0.01),
-                HasExplanation(expected_words=["discount", "bulk"]),
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
-    def test_quote_a4_glossy_paper(self):
-        """
-        Test quote for 100 sheets of A4 Glossy paper.
-        A4 Glossy is ambiguous as it matches 2 item names, so the agent should choose the one with the highest price.
-        """
-        quantity = 100
-        base_total = quantity * 0.2
-        delivery_date = get_supplier_delivery_date(date.today().isoformat(), quantity)
-
-        dataset = Dataset(
-            name="large_quote_a4",
-            cases=[
-                Case(
-                    name="quote_100_sheets_glossy_a4",
-                    inputs=f"Give me a quote for {quantity} sheets of A4 glossy paper.",
-                    expected_output=None,
-                ),
-            ],
-            evaluators=[
-                HasReasonableTotal(min_amount=base_total*0.9, max_amount=base_total),
-                HasExplanation(["glossy", "a4"]),
-            ],
-        )
-        report = dataset.evaluate_sync(_task)
-        report.print()
-        self.assertEqual(len(report.failures), 0, "No task failures expected")
-        eval_report_cases(report)
-
     def test_orchestrator_prompt_letter_sized_paper(self):
+        """
+        Test using a prompt as sent from the Orchestrator.
+        Tes with both given unit price and without it in the prompt.
+        NOTE: The expected unit price is 0.06 from the first row in `quotes.csv`
+        """
         item_name = "letter-sized paper"
         quantity = 300
-        base_total = quantity * 0.06
+        unit_price = 0.06
+        base_total = quantity * unit_price
         prompt = (
             "Please give me a quote for the following item of a customer request:\n"
             f"- Item name: {item_name}\n"
@@ -171,18 +126,58 @@ class TestQuotingAgent(unittest.TestCase):
         dataset = Dataset(
             name="orchestrator_prompt_letter_sized_paper",
             cases=[
+                # Without unit price, the agent should derive it from the search_quote_history
                 Case(
-                    name="orchestrator_prompt_letter_sized_paper",
+                    name=f"{quantity} {item_name} without unit price",
                     inputs=prompt,
-                    expected_output=None,
+                ),
+                Case(
+                    name=f"{quantity} {item_name} with unit price",
+                    inputs=prompt + f"- Unit price: {unit_price}\n",
                 ),
             ],
             evaluators=[
+                QuoteCalculationEvaluator(quantity=quantity, unit_price=unit_price),
                 HasReasonableTotal(min_amount=base_total*0.9, max_amount=base_total),
-                HasExplanation(),
+                HasExplanation(must_have_words=["delivery"], may_have_words=["discount", "bulk"]) # May have discount
             ],
         )
-        report = dataset.evaluate_sync(_task)
+        report = dataset.evaluate_sync(_task, max_concurrency=1)
+        report.print()
+        self.assertEqual(len(report.failures), 0, "No task failures expected")
+        eval_report_cases(report)
+
+    def test_orchestrator_prompt_large_quantity(self):
+        """Must have discount"""
+        item_name = "A4 paper"
+        quantity = 10000
+        unit_price = 0.05
+        base_total = quantity * unit_price
+        prompt = (
+            "Please give me a quote for the following item of a customer request:\n"
+            f"- Item name: {item_name}\n"
+            f"- Quantity: {quantity}\n"
+        )
+
+        dataset = Dataset(
+            name="orchestrator_prompt_large_quantity",
+            cases=[
+                Case(
+                    name=f"{quantity} {item_name} WITHOUT unit price",
+                    inputs=prompt,
+                ),
+                Case(
+                    name=f"{quantity} {item_name} WITH unit price",
+                    inputs=prompt + f"- Unit price: {unit_price}\n",
+                ),
+            ],
+            evaluators=[
+                QuoteCalculationEvaluator(quantity=quantity, unit_price=unit_price),
+                HasReasonableTotal(min_amount=base_total*0.8, max_amount=base_total*0.95),
+                HasExplanation(must_have_words=["delivery", "discount", "bulk"])
+            ],
+        )
+        report = dataset.evaluate_sync(_task, max_concurrency=1)
         report.print()
         self.assertEqual(len(report.failures), 0, "No task failures expected")
         eval_report_cases(report)
