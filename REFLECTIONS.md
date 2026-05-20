@@ -68,17 +68,34 @@ This proved to be the most effective and cost-efficient implementation given the
 
 ## Result Report analysis
 
-### Weaknesses
-* Sometimes the **Order Processor Agent**** fails to identify the requested delivery date.
-* Sometimes the **Order Processor Agent**** struggles to find the best name match for the items, which is understandable. 
-* When the order is not fulfillable due to inability to meet quantities by the desired delivery date,
-  sometimes the **Orchestrator Agent** wrongly states that it has placed orders to replenish the inventory.
-* Depending on the step where the workflow fails, sometimes the **Orchestrator Agent** is unable to fill out the `delivery_date` field in the response.
-  This is also somewhat understandable because that date is passed around a lot both in the inputs and outputs.
+### Weaknesses (& Bugs)
+1\. Sometimes the **Order Processor Agent** fails to identify the request date. This leads the agent to use the current date 
+as the request date, which in turn causes the workflow to fail because the order delivery date is in the past. See:
+* `request_id=2` in `test_results.csv`.
+* `request_id=6` in `test_results_20250519.csv`.
+
+2\. Sometimes the **Order Processor Agent**** struggles to find the best name match for the item. 
+While this is understandable because name matching is a non-exact task, it hinders the efficacy of the agent. See:
+* `request_id=9` in `test_results_20250519.csv` - The agent failed due to inability to match "50 packets of 100% recyled paper" 
+  from the input, to `Kraft paper` in the `inventory` table.
+
+3\. Even after explicitly requesting the Orchestrator Agent to "NEVER mention replenishment, supplier orders, 
+or projected replenishment dates in the response for the customer", it still does it. See:
+* `request_id=8` in `test_results.csv`
+* `request_id=9` in `test_results.csv`
 
 ### Strengths
-* The human-readable answer of the agent is always consistent with the structured part of the response.
-* The whole workflow is quite deterministic, thanks to the usage of Pydantic models and "fat" tools.
+1\. The agent can correctly identify when orders can not be fulfilled due to items not being available in the inventory, 
+or not relevant to the company's business. See:
+* `request_id=2` in `test_results_20250519.csv`
+
+2\. The human-readable answer of the agent is always consistent with the structured part of the response. See:
+* All Scores from the LLM Judge have a value of `1.0` in both `test_results_20250519.csv` and `test_results.csv`.
+
+3\. Mathematical computations for quote pricing and inventory volumes are completely deterministic.\
+This precision is validated through the unit test suites and logs of the Quoting and Inventory agents.\
+The ultimate proof of this stability is that the Quoting Agent's output validations never failed or timed out 
+due to exceeding maximum retry limits during evaluation runs (see `test_results_20250519.csv` and `test_results.csv`).
 
 
 ## Areas of improvement for the project
@@ -87,7 +104,7 @@ This proved to be the most effective and cost-efficient implementation given the
   * More edge-case testing for all individual agent tests
   * Make it possible to test the orchestrator workflow partially
 * Some prompts are a bit brittle as they reference specific fields of the response, which should not be necessary if the Pydantic models have good descriptions
-* Create output validators for all the agents (if idempotency is possible)
+* Create output validators for all the agents (specially Inventory Agent)
 * Consider including the intermediate structured responses in the final response to make the LLMJudge evaluate full consistency of the workflow and response 
 * Ensure that every tool receives and returns Pydantic models.
 * Correlation IDs for request tracing in the logs
