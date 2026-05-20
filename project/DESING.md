@@ -4,59 +4,113 @@
 
 ```mermaid
 flowchart TD
-  subgraph "Multi-Agent System"
-    Orchestrator[Orchestrator Agent\nRoutes & Orchestrates]
-    OrderProcessorAgent[Order Processor Agent\nParse and understand customer request]
-    QuotingAgent[Quoting Agent\nGenerates competitive quotes]
-    InventoryAgent[Inventory Agent\nAnswers stock queries & manages reorders]
-    SalesAgent[Sales Agent\nFinalizes transactions]
+    subgraph "Multi-Agent System"
+        Orchestrator[Orchestrator Agent\nRoutes & Orchestrates]
+        OrderProcessorAgent[Order Processor Agent\nParse and understand customer request]
+        QuotingAgent[Quoting Agent\nGenerates competitive quotes]
+        InventoryAgent[Inventory Agent\nAnswers stock queries & manages reorders]
+        SalesAgent[Sales Agent\nFinalizes transactions]
 
-    subgraph OrderWorkflow [Sequential Order Workflow Execution]
-      direction TB
-      OrderProcessorAgent -.-> QuotingAgent
-      QuotingAgent -.-> InventoryAgent
-      InventoryAgent -.-> SalesAgent
+        subgraph OrchestratorWorkflow["Orchestrator Workflow"]
+            Orchestrator --> process_order_info
+            Orchestrator --> generate_quote
+            generate_quote --> ow_get_inventory_items_by_name[get_inventory_items_by_name]
+            Orchestrator --> manage_inventory
+            Orchestrator --> handle_sale
+            process_order_info -.-> generate_quote
+            generate_quote -.-> manage_inventory
+            manage_inventory -.-> handle_sale
+            Orchestrator --> generate_financial_report
+        end
+
+        subgraph WorkerAgents["Worker Agents"]
+            process_order_info --> OrderProcessorAgent
+            generate_quote --> QuotingAgent
+            manage_inventory --> InventoryAgent
+            handle_sale --> SalesAgent
+        end
+
+        subgraph OrderProcTools["Order Processor Agent Tools"]
+            OrderProcessorAgent --> opa_get_all_item_names[get_all_item_names]
+            OrderProcessorAgent --> get_current_date
+        end
+
+        subgraph QuotingTools["Quoting Agent Tools"]
+            QuotingAgent --> search_quote_history
+        end
+
+        subgraph InventoryTools["Inventory Agent Tools"]
+            InventoryAgent --> analyze_order_stock_requirements
+            InventoryAgent --> order_shortage_from_supplier
+            InventoryAgent --> replenish_to_minimum
+            InventoryAgent --> get_all_inventory
+            analyze_order_stock_requirements --> get_inventory_items_by_name
+            analyze_order_stock_requirements --> get_stock_level
+            analyze_order_stock_requirements --> get_supplier_delivery_date
+            order_shortage_from_supplier --> get_cash_balance
+            order_shortage_from_supplier --> ia_create_transaction[create_transaction]
+            replenish_to_minimum --> ia_create_transaction[create_transaction]
+        end
+
+        subgraph SalesTools["Sales Agent Tools"]
+            SalesAgent --> sa_create_transaction[create_transaction]
+        end
     end
-  end
 
-  CustomerInput([Customer Request]) --> Orchestrator
-  Orchestrator --> OrderProcessorAgent
-  Orchestrator --> QuotingAgent
-  Orchestrator --> InventoryAgent
-  Orchestrator --> SalesAgent
-  Orchestrator --> SystemOutput([System Response])
+    CustomerInput([Customer Request]) --> Orchestrator
+    Orchestrator --> SystemOutput([System Response])
 
-  subgraph "Tools by Agent"
-    OrderProcessorAgent --> ProcTools["get_all_item_names\nget_current_date\n"]
-    QuotingAgent --> QuoteTools["get_all_item_names\nsearch_quote_history\nget_inventory_items_by_name\n"]
-    InventoryAgent --> InvTools["analyze_order_stock_requirements\norder_shortage_from_supplier\nreplenish_to_minimum"]
-    SalesAgent --> SalesTools["create_transaction"]
-  end
+    subgraph "Data Source"
+        SQLiteDB[("SQLite Database\n(munder_difflin.db)")]
+    end
 
-  subgraph "Data Source"
-    SQLiteDB[("SQLite Database\n(munder_difflin.db)")]
-  end
-
-  ProcTools --> SQLiteDB
-  QuoteTools --> SQLiteDB
-  InvTools --> SQLiteDB
-  SalesTools --> SQLiteDB
-  
-  Orchestrator:::agent
-  OrderProcessorAgent:::agent
-  QuotingAgent:::agent
-  InventoryAgent:::agent
-  SalesAgent:::agent
-  ProcTools:::tool
-  InvTools:::tool
-  QuoteTools:::tool
-  SalesTools:::tool
-  SQLiteDB:::db
-
-  style OrderWorkflow stroke:#D50000
-  classDef agent fill: #e1f5fe, stroke: #03a9f4, stroke-width: 2px
-  classDef tool fill: #fff3e0, stroke: #ff9800, stroke-width: 2px
-  classDef db fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
+    ow_get_inventory_items_by_name --> SQLiteDB
+    generate_financial_report --> SQLiteDB
+    opa_get_all_item_names --> SQLiteDB
+    search_quote_history --> SQLiteDB
+    get_all_inventory --> SQLiteDB
+    get_inventory_items_by_name --> SQLiteDB
+    get_stock_level --> SQLiteDB
+    get_cash_balance --> SQLiteDB
+    ia_create_transaction --> SQLiteDB
+    sa_create_transaction --> SQLiteDB
+    
+    Orchestrator:::agent
+    OrderProcessorAgent:::agent
+    QuotingAgent:::agent
+    InventoryAgent:::agent
+    SalesAgent:::agent
+    
+    process_order_info:::tool
+    generate_quote:::tool
+    ow_get_inventory_items_by_name:::tool
+    manage_inventory:::tool
+    handle_sale:::tool
+    opa_get_all_item_names:::tool
+    get_current_date:::tool
+    search_quote_history:::tool
+    analyze_order_stock_requirements:::tool
+    order_shortage_from_supplier:::tool
+    replenish_to_minimum:::tool
+    get_inventory_items_by_name:::tool
+    get_stock_level:::tool
+    get_supplier_delivery_date:::tool
+    get_cash_balance:::tool
+    ia_create_transaction:::tool
+    sa_create_transaction:::tool
+    
+    SQLiteDB:::db
+    
+    style OrchestratorWorkflow stroke: #D50000, stroke-width: 3px
+    style WorkerAgents stroke: #FF991C, stroke-width: 3px
+    style OrderProcTools stroke: #6B6BFF, stroke-width: 2px
+    style QuotingTools stroke: #6B6BFF, stroke-width: 2px
+    style InventoryTools stroke: #6B6BFF, stroke-width: 2px
+    style SalesTools stroke: #6B6BFF, stroke-width: 2px
+    
+    classDef agent fill: #e1f5fe, stroke: #03a9f4, stroke-width: 2px
+    classDef tool fill: ##D3D3FF, stroke: ##7676FF, stroke-width: 1px
+    classDef db fill: #e8f5e9, stroke: #4caf50, stroke-width: 2px
 ```
 
 ### Orchestrator Agent Responsibilities

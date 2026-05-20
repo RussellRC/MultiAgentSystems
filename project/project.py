@@ -13,8 +13,7 @@ import pandas as pd
 import yaml
 from dotenv import load_dotenv
 from nocasedict import NocaseDict
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ConfigDict, TypeAdapter, BeforeValidator
+from pydantic import BaseModel, Field, ConfigDict, TypeAdapter, BeforeValidator, PlainSerializer
 from pydantic_ai import Agent, ModelRetry, RunContext, Tool, AgentRunResult, ModelSettings
 from pydantic_ai.capabilities import Thinking
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -135,6 +134,7 @@ def validate_nocase_dict(value: Any) -> NocaseDict:
         return NocaseDict(value)
     raise ValueError("Value must be a dictionary")
 
+
 class InventorySnapshot(BaseModel):
     """
     Snapshot of calculated stock levels of an item or items as of a specific date.
@@ -143,6 +143,7 @@ class InventorySnapshot(BaseModel):
     items: Annotated[
         NocaseDict,
         BeforeValidator(validate_nocase_dict),
+        PlainSerializer(lambda x: dict(x), return_type=dict),
         Field(description=(
             "Dictionary holding the stock levels of each item, where: "
             "The key is the name of the item (must be a string). "
@@ -622,13 +623,7 @@ def generate_financial_report(as_of_date: str | datetime) -> FinancialReport:
         as_of_date (str or datetime): The date (inclusive) for which to generate the report.
 
     Returns:
-        Dict: A dictionary containing the financial report fields:
-            - 'as_of_date': The date of the report
-            - 'cash_balance': Total cash available
-            - 'inventory_value': Total value of inventory
-            - 'total_assets': Combined cash and inventory value
-            - 'inventory_summary': List of items with stock and valuation details
-            - 'top_selling_products': List of top 5 products by revenue
+        A complete financial report for the company as of a specific date.
     """
     # Normalize date input
     if isinstance(as_of_date, datetime):
@@ -671,16 +666,17 @@ def generate_financial_report(as_of_date: str | datetime) -> FinancialReport:
                         AND transaction_date <= :date
                       GROUP BY item_name
                       HAVING total_units > 0
-                      ORDER BY total_revenue DESC LIMIT 5 \
+                      ORDER BY total_revenue DESC
+                      LIMIT 5 \
                       """
     top_sales = pd.read_sql(top_sales_query, DB_ENGINE, params={"date": as_of_date})
     top_selling_products = top_sales.to_dict(orient="records")
 
     report = {
         "as_of_date": as_of_date,
-        "cash_balance": cash,
-        "inventory_value": inventory_value,
-        "total_assets": cash + inventory_value,
+        "cash_balance": round(cash, 2),
+        "inventory_value": round(inventory_value, 2),
+        "total_assets": round(cash + inventory_value, 2),
         "inventory_summary": inventory_summary,
         "top_selling_products": top_selling_products,
     }
@@ -1072,7 +1068,8 @@ def replenish_to_minimum(items_to_order: List[ReplenishToMinItemDetails], as_of_
 
     except Exception as e:
         logger.error("Error bringing up stock to minimum levels.", exc_info=True)
-        return OrderFromSupplierResult(messages=["I'm sorry, we encountered an error while bringing up stock to minimum levels"])
+        return OrderFromSupplierResult(
+            messages=["I'm sorry, we encountered an error while bringing up stock to minimum levels"])
 
 
 #########################
@@ -1095,14 +1092,12 @@ load_dotenv()
 assert os.getenv("OPENAI_BASE_URL")
 assert os.getenv("OPENAI_API_KEY")
 
-client = AsyncOpenAI(
-    base_url=os.getenv("OPENAI_BASE_URL"),
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
 gpt_4o_mini = OpenAIChatModel(
     'gpt-4o-mini',
-    provider=OpenAIProvider(openai_client=client)
+    provider=OpenAIProvider(
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        api_key=os.getenv("OPENAI_API_KEY")
+    )
 )
 
 
@@ -1179,6 +1174,7 @@ ORDER_PROCESSOR_SYSTEM_PROMPT = (
     "### OUTPUT\n"
     "- You MUST provide your final response in the structured format with all required fields.\n"
 )
+
 
 def new_order_processor_agent() -> Agent:
     order_processor_agent = Agent(
@@ -1282,11 +1278,7 @@ def new_quoting_agent() -> Agent:
         output_type=ItemQuote,
         output_retries=3,
         tools=[
-            Tool(get_all_item_names, docstring_format="google", require_parameter_descriptions=True),
-            # to assist in inferring item names
             Tool(search_quote_history, docstring_format="google", require_parameter_descriptions=True),
-            # get past quotes
-            # Tool(get_inventory_items_by_name, docstring_format="google", require_parameter_descriptions=True) # to get unit_price
         ]
     )
 
@@ -1389,7 +1381,8 @@ def new_inventory_agent() -> Agent:
         tools=[
             Tool(analyze_order_stock_requirements, docstring_format="google", require_parameter_descriptions=True),
             Tool(order_shortage_from_supplier, docstring_format='google', require_parameter_descriptions=True),
-            Tool(replenish_to_minimum, docstring_format='google', require_parameter_descriptions=True)
+            Tool(replenish_to_minimum, docstring_format='google', require_parameter_descriptions=True),
+            Tool(get_all_inventory, docstring_format='google', require_parameter_descriptions=True),
         ]
     )
     return inventory_agent
@@ -1471,8 +1464,7 @@ class OrchestratorAgentOutput(BaseModel):
         "It should also have confirmation about the quantities, quoted prices and applied discounts."))
     total_amount: float = Field(
         description="Grand total price of the order quoted to the customer, including discounts. Computed by the sum of all the individual quotes for each item in the order.")
-    delivery_date: str | None = Field(description="Delivery date for the order, in ISO format.",
-                                      examples=['2026-01-31'], default=None)
+    delivery_date: str = Field(description="Delivery date for the order, in ISO format.", examples=['2026-01-31'])
     request_metadata: RequestMetadata | None = Field(description="Metadata about the customer request.", default=None)
 
 
@@ -1493,6 +1485,7 @@ ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
     "### OUTPUT AND TONE:\n"
     "- Always be polite and friendly.\n"
     "- You MUST provide your final response in the structured format with all required fields.\n"
+    "- NEVER mention replenishment, supplier orders, or projected replenishment dates in the response for the customer."
 )
 
 
@@ -1503,7 +1496,10 @@ def _build_orchestrator_agent() -> Agent:
         system_prompt=ORCHESTRATOR_AGENT_SYSTEM_PROMPT,
         capabilities=[Thinking()],
         deps_type=OrchestratorDependencies,
-        output_type=OrchestratorAgentOutput
+        output_type=OrchestratorAgentOutput,
+        tools=[
+            Tool(generate_financial_report, docstring_format='google', require_parameter_descriptions=True)
+        ]
     )
 
     @orchestrator_agent.tool(docstring_format='google', require_parameter_descriptions=True)
@@ -1737,7 +1733,8 @@ class OrchestratorAgent:
         :param customer_message: The customer's order request
         :return: A human-readable response to the customer
         """
-        logger.info("Processing customer order through orchestrator agent.", extra={"customer_message": customer_message})
+        logger.info("Processing customer order through orchestrator agent.",
+                    extra={"customer_message": customer_message})
         response = self.orchestrator_agent.run_sync(user_prompt=customer_message,
                                                     deps=self.orchestrator_dependencies)
         return response
@@ -1754,6 +1751,10 @@ def run_test_scenarios():
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
         )
         quote_requests_sample.dropna(subset=["request_date"], inplace=True)
+        quote_requests_sample["delivery_date"] = pd.to_datetime(
+            quote_requests_sample["delivery_date"], format="%m/%d/%y", errors="coerce"
+        )
+        quote_requests_sample.dropna(subset=["delivery_date"], inplace=True)
         quote_requests_sample = quote_requests_sample.sort_values("request_date")
     except Exception as e:
         logger.error("FATAL: Error loading test data", exc_info=True)
@@ -1792,10 +1793,12 @@ def run_test_scenarios():
     for index, row in quote_requests_sample.iterrows():
         idx = cast(int, index)
         request_date = row["request_date"].strftime("%Y-%m-%d")
+        delivery_date = row["delivery_date"].strftime("%Y-%m-%d")
 
         print(f"\n=== Request {idx + 1} ===")
         print(f"Context: {row['job']} organizing {row['event']}")
         print(f"Request Date: {request_date}")
+        print(f"Delivery Date: {delivery_date}")
         print(f"Cash Balance: ${current_cash:.2f}")
         print(f"Inventory Value: ${current_inventory:.2f}")
 
@@ -1824,10 +1827,13 @@ def run_test_scenarios():
             metrics={},
         )
         judge_report = judge.evaluate_sync(judge_ctx)
-        evaluation_reason: EvaluationReason = judge_report.get("LLMJudge") # TODO: is there a better way to get this?
+        evaluation_reason: EvaluationReason = judge_report.get("LLMJudge")  # TODO: is there a better way to get this?
 
         # Update state
-        report = generate_financial_report(request_date)
+        # NOTE: I changed the date in the line below from request_date to delivery_date
+        # because my whole implementation hinges on the EXPECTED/PROJECTED state as of delivery dates of the orders,
+        # not on the request date.
+        report = generate_financial_report(delivery_date)
         current_cash = report.cash_balance
         current_inventory = report.inventory_value
 
@@ -1841,18 +1847,21 @@ def run_test_scenarios():
             {
                 "request_id": idx + 1,
                 "request_date": request_date,
+                "delivery_date": delivery_date, # NOTE: I added this
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": orchestrator_agent_output,
-                "judge_score": evaluation_reason.value,
-                "judge_reason": evaluation_reason.reason
+                "response": orchestrator_agent_output.customer_response,
+                "judge_score": evaluation_reason.value, # NOTE: I added this
+                "judge_reason": evaluation_reason.reason # NOTE: I added this
             }
         )
 
         time.sleep(1)
 
     # Final report
-    final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
+    # NOTE: I changed the date in the line below because my whole implementation hinges on the PROJECTED state
+    # as of delivery dates of the orders, not on the "request date".
+    final_date = quote_requests_sample["delivery_date"].max().strftime("%Y-%m-%d")
     final_report = generate_financial_report(final_date)
     print("\n===== FINAL FINANCIAL REPORT =====")
     print(f"Final Cash: ${final_report.cash_balance:.2f}")
