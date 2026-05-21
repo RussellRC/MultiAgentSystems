@@ -31,10 +31,19 @@ We used `smolagents` in Course 4, so I saw this as a great opportunity to learn 
   even when using stronger models like GPT-4 and high-effort Thinking.
 
 * **Final Decision:** I shifted to a "Thin Agent, Fat Tools" architecture. I offloaded deterministic logic—like calculating shortages and reorder quantities—into function tools (e.g., `analyze_order_stock_requirements`).
-  * **Stateless Orchestration:** I intentionally avoided the complexity of an in-memory shared context.
-    Instead, I used the Database as the single source of truth, passing explicit DTOs between agents via the Orchestrator.
 
 * **Result:** Reduced "thinking complexity" for the agents, eliminated math errors, and improved reliability across all test cases.
+
+### Important decisions
+**Projected State Evaluation (Simulated Timeline Logic)**\
+All inventory and cash flow checks evaluate the projected state as of the **order expected delivery date, rather than the request date**.\
+Since the test suite runs on a sequential, simulated historical timeline, checking real-time balances at the moment of a request creates a temporal mismatch.\ 
+For example, a supplier restock might clear out the cash on day 3, but if an order requested on day 1 isn't delivered until day 5, checking "current" cash on day 1 won't reflect that upcoming hit.\
+Basing decisions on the delivery target ensures that resource allocations, supplier lead times, and financial balances remain strictly causal and accurate down the timeline.
+
+**Stateless Orchestration**\
+I intentionally avoided the complexity of an in-memory shared context.
+  Instead, I used the Database as the single source of truth, passing explicit DTOs between agents via the Orchestrator.
 
 ### My engineering journey (Wall of Text version)
 
