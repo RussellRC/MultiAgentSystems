@@ -1485,7 +1485,10 @@ ORCHESTRATOR_AGENT_SYSTEM_PROMPT = (
     "### OUTPUT AND TONE:\n"
     "- Always be polite and friendly.\n"
     "- You MUST provide your final response in the structured format with all required fields.\n"
-    "- NEVER mention replenishment, supplier orders, or projected replenishment dates in the response for the customer."
+    "- CUSTOMER COMMUNICATION RULE: NEVER leak internal operational details (e.g., 'replenish', 'supplier', 'restock', 'stock shortage') to the customer.\n"
+    "- If an order fails due to inventory or supplier issues, frame it generically as 'item unavailability' or 'unable to meet the requested timeline'.\n"
+    "   - BAD EXAMPLE: 'We cannot fulfill your order because supplier replenishment takes 4 days.'\n"
+    "   - GOOD EXAMPLE: 'Unfortunately, we do not have the required inventory available to meet your requested delivery date.'\n"
 )
 
 
@@ -1707,6 +1710,23 @@ def _build_orchestrator_agent() -> Agent:
                     "I'm sorry, we encountered an error finalizing a sales transaction for your order. Please try again later or contact customer service."],
                 request_status="DECLINED"
             )]
+
+    @orchestrator_agent.output_validator
+    def guard_inner_workings(output: OrchestratorAgentOutput) -> OrchestratorAgentOutput:
+        """
+        Ensures the agent does not leak internal functionality to the customer / end-user.
+        """
+        forbidden_terms = ["replenish", "supplier", "restock", "shortage"]
+        response_lower = output.customer_response.lower()
+
+        flagged = [term for term in forbidden_terms if term in response_lower]
+        if flagged:
+            raise ModelRetry(
+                f"Validation Failed: Your customer_response contains internal terminology ('{flagged}'). "
+                "Rewrite the response to be generic (e.g., 'items are currently unavailable to meet your timeline') "
+                "without leaking operational details."
+            )
+        return output
 
     return orchestrator_agent
 
